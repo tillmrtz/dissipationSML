@@ -20,11 +20,11 @@ This repository will contain all code that I will use for my Master's project
 # Glider missions:
 Overview: https://iop.apl.washington.edu/seaglider/index.php?mission=Faroes
 Server url: https://www.ncei.noaa.gov/data/oceans/glider/seaglider/uw/
-11/06
+11/06 \n
 - 016 early recovered (124 dives)  016/20061112
 - 101 full mission (578 dives) 101/20061112
 - 102 full mission (630 dives) 102/20061112
-2/07
+2/07 \n 
 - 103 full mission (679 dives) 103/20070218
 - 105 FSC section (125 dives) no folder
 - 104 early recovery (70 dives) no folder
