@@ -1,0 +1,111 @@
+server_url: "https://www.ncei.noaa.gov/data/oceans/glider/seaglider/uw/"
+
+gliders:
+  - name: "005"
+    missions:
+      - date: 06/08
+        dives: 386
+        folder: "005/20080606"
+      - date: 06/09
+        dives: 464
+        folder: "005/20090829"
+      - date: 11/08
+        dives: 486
+        folder: "005/20081106"
+  - name: "012"
+    missions:
+      - date: 09/07
+        dives: 188
+        folder: "012/20070831"
+  - name: "014"
+    missions:
+      - date: 02/08
+        dives: 70
+        folder: "014/20080214"
+      - date: 08/08
+        dives: 439
+        folder: "014/20080222"
+  - name: "016"
+    missions:
+      - date: 11/06
+        dives: 124
+        folder: "016/20061112"
+      - date: 11/07
+        dives: 452
+        folder: "016/20071113"
+      - date: 06/08
+        dives: 421
+        folder: "016/20080607"
+      - date: 06/09
+        dives: 297
+        folder: "016/20090605"
+  - name: "101"
+    missions:
+      - date: 11/06
+        dives: 578
+        folder: "101/20061112"
+      - date: 06/07
+        dives: 453
+        folder: "101/20070609"
+      - date: 11/08
+        dives: 338
+        folder: "101/20081108"
+  - name: "102"
+    missions:
+      - date: 11/06
+        dives: 630
+        folder: "102/20061112"
+      - date: 06/07
+        dives: 22
+        folder: "no folder"
+      - date: 11/07
+        dives: 454
+        folder: "102/20071113"
+      - date: 06/08
+        dives: 5
+        folder: "no folder"
+  - name: "103"
+    missions:
+      - date: 02/07
+        dives: 679
+        folder: "103/20070218"
+      - date: 11/07
+        dives: 524
+        folder: "103/20071113"
+      - date: 02/09
+        dives: 481
+        folder: "103/20090223"
+      - date: 08/08
+        dives: 10
+        folder: "no folder"
+  - name: "104"
+    missions:
+      - date: 02/07
+        dives: 70
+        folder: "no folder"
+      - date: 09/07
+        dives: 371
+        folder: "104/20070901"
+      - date: 02/08
+        dives: 112
+        folder: "104/20080214"
+      - date: 11/08
+        dives: 1
+        folder: "no folder"
+      - date: 02/09
+        dives: 4
+        folder: "no folder"
+  - name: "105"
+    missions:
+      - date: 02/07
+        dives: 125
+        folder: "no folder"
+      - date: 09/07
+        dives: 373
+        folder: "no folder"
+      - date: 08/08
+        dives: 13
+        folder: "no folder"
+      - date: 06/09
+        dives: 346
+        folder: "no folder"
