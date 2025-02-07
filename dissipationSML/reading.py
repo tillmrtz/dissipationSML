@@ -2,9 +2,10 @@ import xarray as xr
 import os
 from bs4 import BeautifulSoup
 import requests
-import pooch
+from tqdm import tqdm
 import os
 import requests
+from seagliderOG1 import convertOG1, writers
 
 def download_file_from_server(file_name, server_url, destination_path):
     """
@@ -149,6 +150,16 @@ def load_glider_config(yaml_path):
         return yaml.safe_load(file)
 
 def interactive_glider_selection(yaml_path):
+    """
+    Interactive function that displays all gliders and their dedicated missions. After confirming both statements,
+    a directory with the url and the glider mission information is returned.
+
+    Parameters:
+    yaml_path (str): The path of the yaml file that summarizes the server url and each glider mission of interest
+
+    Returns:
+    dict: A dictionary that contains the exact server url to the glider's mission and it's information
+    """
     config = load_glider_config(yaml_path)
     server_url = config['server_url']
     gliders = config['gliders']
@@ -157,7 +168,7 @@ def interactive_glider_selection(yaml_path):
     glider_dropdown = widgets.Dropdown(options=glider_names, description='Select Glider:')
     mission_dropdown = widgets.Dropdown(options=['Select a glider first'], description='Select Mission:', disabled=True)
     
-    path_output = {'path': None,'dives': None}
+    path_output = {'path': None,'dives': None,'glider':None,'mission':None}
 
     def update_missions(change):
         selected_glider = change['new']
@@ -186,6 +197,8 @@ def interactive_glider_selection(yaml_path):
             )
             path_output['path'] = f"{server_url}{mission_folder}/"
             path_output['dives'] = int(selected_mission.split('dives: ')[1].replace(')', ''))
+            path_output['glider'] = selected_glider
+            path_output['mission'] = mission_folder.split('/')[1]
         
         clear_output()
         display(glider_dropdown, mission_dropdown, confirm_button)
@@ -198,4 +211,27 @@ def interactive_glider_selection(yaml_path):
     display(glider_dropdown, mission_dropdown, confirm_button)
     
     return path_output
+
+
+def convert_with_variables(datasets, variables_needed):
+    """
+    Converts input datasets to the OG1 format, filters for the specified variables,  
+    and renames the 'divenum' variable to 'DIVE_NUMBER'.  
+
+    Args:  
+        datasets (list or iterable): A collection of datasets to be converted.  
+        variables_needed (list): A list of variable names to retain in the converted dataset.  
+
+    Returns:  
+        xarray.Dataset: The transformed dataset with selected variables and renamed column.  
+    """
+    # Check first if variables are in the dataset, if not, raise an error
+    ds = convertOG1.convert_to_OG1(datasets)
+    ds = ds.rename_vars({'divenum': 'DIVE_NUMBER'})
+    for var in variables_needed:
+        if var not in ds.variables:
+            raise ValueError(f"Variable '{var}' not found in dataset. Possible variables are: {list(ds.variables)}")
+    ds = ds[variables_needed]
+    
+    return ds
 

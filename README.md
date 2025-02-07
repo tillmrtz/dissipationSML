@@ -61,3 +61,7 @@ This repository will contain all code that I will use for my Master's project
 - 016 (297 dives) 016/20090605
 - 105 (346 dives) no folder
 - 005 (464 dives) 005/20090829
+
+
+# Bathymetry map
+## The baythmetry map used for some of the plots is based on Gebco Bathymetry Data (https://www.gebco.net/data_and_products/gridded_bathymetry_data/)
