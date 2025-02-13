@@ -184,8 +184,30 @@ def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
 
     return fig, ax1, ax2, ax3
 
-def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: int,use_raw: bool) -> tuple:
+def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw: bool,agg: str = 'mean') -> tuple:
+    """
+    Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
 
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least PROFILE_NUMBER, DEPTH, TEMPERATURE, SALINITY, and DENSITY.
+    profile_num: int
+        The profile number to plot.
+    binning: int
+        The depth resolution for binning.
+    use_raw: bool
+        If True, use raw data for binning.
+    agg: str
+        The aggregation method to use for binning. Default is 'mean'. Other option is 'median'.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax1: matplotlib.axes.Axes
+        The axis object containing the primary plot.
+    """
     with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
         fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
 
@@ -193,7 +215,11 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: int,use_raw: 
         profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
 
         depth, temperature, salinity, density = tools.bin_data(ds_profile = profile,
-                                                                resolution=binning , use_raw= use_raw)
+                                                                resolution=binning , use_raw= use_raw, agg=agg)
+
+        ## cut off unrealistic values
+        salinity = np.where((salinity > 35.5) | (salinity < 34.8), np.nan, salinity)
+        density = np.where((density > 28.5) | (density < 27), np.nan, density)
 
         mld = tools.calculate_mixed_layer_depth(density, depth)
 
@@ -303,10 +329,6 @@ def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple
     Returns
     -------
     One figure with two plots illustrating the max depth of each profile and a histogram of the max depths
-
-    Original author
-    ----------------
-    Till Moritz
     """
     min_depths, max_depths = tools.min_max_depth_per_profile(ds)
     with plt.style.context(plotting_style):
@@ -380,12 +402,17 @@ def plot_MLD_evolution(ds,binning = 1,use_raw = False, plot_density:bool = True)
                             vmin=np.nanpercentile(density, 0.5), vmax=np.nanpercentile(density, 99.5))
             fig.colorbar(d, ax=ax, label='Density [kg/m^3]')
             ax.set_ylim([np.nanmax(depth),0])
-            ax.set_title('Mixed Layer Depth Evolution over Time with density profile')
+            ax.set_title(f'Mixed Layer Depth Evolution over Time with density profile (Binning: {binning} m)')
         else:
             ax.set_ylim([np.nanmax(mld)+10,0])
         ax.set_ylabel('Depth [m]')
         ax.set_xlabel('Time')
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        # Dynamically adjust the interval based on the number of time points
+        num_days = (time[-1] - time[0]).astype('timedelta64[D]').astype(int)
+        interval = max(1, num_days // 25)  # Adjust the divisor to control the number of ticks
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=interval))
+        #ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        #ax.xaxis.set_major_locator(mdates.AutoDateLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m-%Y'))
         ax.tick_params(axis='x', rotation=45)
         ax.grid(True)

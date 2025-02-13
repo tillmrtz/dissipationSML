@@ -1,6 +1,7 @@
 import numpy as np
 import gsw
 import xarray as xr
+import tqdm
 
 def add_pot_density_from_raw_data(ds: xr.Dataset):
     """
@@ -34,62 +35,50 @@ def add_pot_density_from_raw_data(ds: xr.Dataset):
     return ds
 
 
-def bin_data(ds_profile: xr.Dataset, resolution, use_raw=False):
+def bin_data(ds_profile: xr.Dataset, resolution: float, use_raw: bool =False, agg: str = 'mean'):
     """
     Bin depth, temperature, salinity, and compute density using the GSW package while preserving the input data shape.
     
     Parameters:
         ds_profile (xarray.Dataset): The dataset containing depth, temperature, and salinity data of one profile
         resolution (float): The depth resolution for binning.
+        use_raw (bool): Whether to use raw temperature and salinity data.
+        agg (str): The aggregation method to use for binning. Default is 'mean'. Other option is 'median'.
 
     Returns:
         tuple: (binned_depths, binned_temperatures, binned_salinity, binned_density), where each is a numpy array with NaNs for unused indices.
     """
     if use_raw:
-        temperature = ds_profile.TEMP_RAW.values
-        salinity = ds_profile.PSAL_RAW.values
-        density = ds_profile.SIGMA_T_RAW.values
+        temperature = ds_profile.TEMP_RAW
+        salinity = ds_profile.PSAL_RAW
+        density = ds_profile.SIGMA_T_RAW
     else:
-        temperature = ds_profile.TEMP.values
-        salinity = ds_profile.PSAL.values
-        density = ds_profile.SIGMA_T.values
+        temperature = ds_profile.TEMP
+        salinity = ds_profile.PSAL
+        density = ds_profile.SIGMA_T
 
-    depth = ds_profile.DEPTH.values
-    pressure = ds_profile.PRES.values
+    depth = ds_profile.DEPTH
+    pressure = ds_profile.PRES
+    ### group depth values into discrete intervals for analysis with the given resolution
+    bins = np.arange(np.floor(np.min(depth) / resolution) * resolution,
+                     np.ceil(np.max(depth) / resolution) * resolution + resolution,resolution)
 
-    min_depth = np.floor(np.min(depth) / resolution) * resolution
-    max_depth = np.ceil(np.max(depth) / resolution) * resolution
-    bins = np.arange(min_depth, max_depth + resolution, resolution)
+    variables = {"pressure": pressure,"depths": depth,"temperatures": temperature,"salinity": salinity,"density": density}
+    if agg == 'mean':
+        binned_data = {name: var.groupby_bins('DEPTH', bins).mean().values for name, var in variables.items()}
+    elif agg == 'median':
+        binned_data = {name: var.groupby_bins('DEPTH', bins).median().values for name, var in variables.items()}
+    else:
+        raise ValueError(f"Invalid aggregation method: {agg}")
     
-    unique_indices = np.zeros_like(depth, dtype=bool)
-    
-    binned_depths = np.full_like(depth, np.nan)
-    binned_pressure = np.full_like(pressure, np.nan)
+    return binned_data["depths"], binned_data["temperatures"], binned_data["salinity"], binned_data["density"]
 
-    binned_temperatures = np.full_like(temperature, np.nan)
-    binned_salinity = np.full_like(salinity, np.nan)
-    binned_density = np.full_like(density, np.nan)
-
-    
-    for i in range(len(bins) - 1):
-        mask = (depth >= bins[i]) & (depth < bins[i + 1]) & ~unique_indices
-        indices = np.where(mask)[0]
-        
-        if len(indices) > 0:
-            unique_indices[indices] = True
-            binned_depths[indices[0]] = (bins[i] + bins[i + 1]) / 2  # Bin center
-            binned_temperatures[indices[0]] = np.mean(temperature[mask])
-            binned_salinity[indices[0]] = np.mean(salinity[mask])
-            binned_pressure[indices[0]] = np.mean(pressure[mask])
-            binned_density[indices[0]] = np.mean(density[mask])
-
-    return binned_depths, binned_temperatures, binned_salinity, binned_density
 
 def calculate_mixed_layer_depth(density, depth):
     """
     Computes the mixed layer depth (MLD) based on the density profile.
     The MLD is defined as the depth at which density exceeds the reference 
-    density at 10m depth by 0.03 kg/m³ (Evans et al., 2018).
+    density at 10m depth by 0.03 kg/m³ (Theory by Montégut et al., 2004 and used by Beaird et al., 2016 and Evans et al., 2018).
     
     Parameters
     ----------
@@ -118,21 +107,72 @@ def calculate_mixed_layer_depth(density, depth):
     density = density[sort_idx]
 
     # Find the index of the depth closest to 10m
-    depth_idx = np.nanargmin(abs(depth - 10))  # Avoids issues with NaNs
-    depth_10m = depth[depth_idx]
+    depth_idx = np.nanargmin(abs(depth - 10))
     density_10m = density[depth_idx]
+
+    # Select only depths greater than 10m
+    below_10m_mask = depth > 10
+    depth_below_10m = depth[below_10m_mask]
+    density_below_10m = density[below_10m_mask]
+
+    # If no depths are below 10m, return NaN
+    if depth_below_10m.size == 0:
+        return np.nan
 
     # Density threshold
     threshold = 0.03
 
-    # Find the mixed layer depth
-    for i in range(len(density)):
-        if density[i] > density_10m + threshold:
-            return depth[i]  # Return as soon as the threshold is exceeded
+    # Find the mixed layer depth (only analyzing depths below 10m)
+    for i in range(len(density_below_10m)):
+        if density_below_10m[i] > density_10m + threshold:
+            return depth_below_10m[i]  # Return first depth that exceeds threshold
 
     return np.nan  # Return NaN if no depth satisfies the condition
 
 
+def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, binning: float = 1,agg: str = 'mean'):
+    """
+    Computes the mixed layer depth for each profile in the dataset and adds it as a new variable.
+    The value is stored equally for each measurement in each profile.
+    If no mixed layer depth is found for a profile, the value is NaN.
+
+    Parameters
+    ----------
+    ds: xarray dataset containing the potential density data
+
+    Returns
+    -------
+    ds: xarray dataset with the additional variable MLD
+    """
+    mld_array = np.full(len(ds.N_MEASUREMENTS), np.nan)
+    max_profile = int(ds.PROFILE_NUMBER.max().values.item())
+
+    # Initialize tqdm progress bar
+    for profile_number in tqdm.tqdm(range(1, max_profile + 1), desc="Calculating and adding MLD for Profiles", unit="profile"):
+        profile = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
+
+        if profile.N_MEASUREMENTS.size == 0:
+            continue  # Skip if no measurements exist for this profile
+        if use_bins:
+            depth, temperature, salinity, density = bin_data(profile, binning, use_raw, agg)
+        else:
+            if use_raw:
+                density = profile.SIGMA_T_RAW.values
+            else:
+                density = profile.SIGMA_T.values
+            depth = profile.DEPTH.values
+        mld = calculate_mixed_layer_depth(density, depth)
+
+        # Store MLD for the respective indices
+        mld_array[profile.N_MEASUREMENTS.values] = mld
+
+    # Add the computed MLD as a new variable
+    ds['MLD'] = xr.DataArray(mld_array, dims=('N_MEASUREMENTS'),
+                             attrs={'units': 'm', 'long_name': 'Mixed layer depth',
+                                    'data_used': 'Raw' if use_raw else 'Corrected',
+                                    'binning': 'No binning' if not use_bins else f'{str(binning)}m bins',
+                                    'aggregation´': agg if use_bins else 'No binning'})
+    return ds
 
 def min_max_depth_per_profile(ds: xr.Dataset):
     """
