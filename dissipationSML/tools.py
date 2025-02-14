@@ -73,6 +73,20 @@ def bin_data(ds_profile: xr.Dataset, resolution: float, use_raw: bool =False, ag
     
     return binned_data["depths"], binned_data["temperatures"], binned_data["salinity"], binned_data["density"]
 
+def linear_interpolation(x, y, x_new):
+    """
+    Linearly interpolates the given x and y values to new x values.
+    
+    Parameters:
+        x (numpy array): The x values to interpolate from.
+        y (numpy array): The y values to interpolate from.
+        x_new (numpy array): The new x values to interpolate to.
+    
+    Returns:
+        numpy array: The interpolated y values at the new x values.
+    """
+    return np.interp(x_new, x, y)
+
 
 def calculate_mixed_layer_depth(density, depth):
     """
@@ -106,10 +120,15 @@ def calculate_mixed_layer_depth(density, depth):
     depth = depth[sort_idx]
     density = density[sort_idx]
 
-    # Find the index of the depth closest to 10m
-    depth_idx = np.nanargmin(abs(depth - 10))
-    density_10m = density[depth_idx]
-
+    ### check if there exist the depth of 10m in the profile
+    if 10 in depth:
+        # Find the index of the depth closest to 10m
+        depth_idx = np.nanargmin(abs(depth - 10))
+        density_10m = density[depth_idx]
+    else:
+        # Interpolate the density at 10m depth with the two closest depth values
+        density_10m = linear_interpolation(depth, density, 10)
+        
     # Select only depths greater than 10m
     below_10m_mask = depth > 10
     depth_below_10m = depth[below_10m_mask]
