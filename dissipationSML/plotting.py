@@ -22,19 +22,22 @@ bathymetry = xr.open_dataset(f"{dir}/GEBCO_2024_IFR.nc")
 
 def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple({plt.Figure, plt.Axes}):
     """
-    This function plots the glider track on a map, with latitude and longitude colored by time.
+    This function plots the glider track on a map, with latitude and longitude colored by time. Contour lines are added to the plot.
 
     Parameters
     ----------
-    ds: xarray in OG1 format with at least TIME, LATITUDE, and LONGITUDE.
-    ax: Optional; axis to plot the data.
-    kw: Optional; additional keyword arguments for the scatter plot.
+    ds: xarray.Dataset
+        Dataset with variables ** LATITUDE, LONGITUDE** and **TIME**
+    ax: matplotlib.axes.Axes, default = None
+        Existing Axes that the data should plotted to. 
+    **kw: Optional; additional keyword arguments for the scatter plot.
 
     Returns
     -------
-    One plot with the map of the glider track.
     fig: matplotlib.figure.Figure
-    ax: matplotlib.axes._subplots.AxesSubplot
+        The figure object containing the plot.
+    ax: matplotlib.axes.Axes
+        The axis object containing the primary plot.
     """
     with plt.style.context(plotting_style):
         if ax is None:
@@ -328,7 +331,10 @@ def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple
     
     Returns
     -------
-    One figure with two plots illustrating the max depth of each profile and a histogram of the max depths
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax: matplotlib.axes.Axes
+        The axis object containing the primary plot.
     """
     min_depths, max_depths = tools.min_max_depth_per_profile(ds)
     with plt.style.context(plotting_style):

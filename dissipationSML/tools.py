@@ -88,7 +88,7 @@ def linear_interpolation(x, y, x_new):
     return np.interp(x_new, x, y)
 
 
-def calculate_mixed_layer_depth(density, depth):
+def calculate_mixed_layer_depth(density: np.array, depth: np.array):
     """
     Computes the mixed layer depth (MLD) based on the density profile.
     The MLD is defined as the depth at which density exceeds the reference 
@@ -128,7 +128,7 @@ def calculate_mixed_layer_depth(density, depth):
     else:
         # Interpolate the density at 10m depth with the two closest depth values
         density_10m = linear_interpolation(depth, density, 10)
-        
+
     # Select only depths greater than 10m
     below_10m_mask = depth > 10
     depth_below_10m = depth[below_10m_mask]
