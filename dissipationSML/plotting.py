@@ -1,6 +1,5 @@
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-import matplotlib
 from cmocean import cm as cmo
 import numpy as np
 import pandas as pd
@@ -9,12 +8,17 @@ import xarray as xr
 from matplotlib.dates import DateFormatter
 from scipy import stats
 import matplotlib.colors as mcolors
-import gsw
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-import warnings
 import os
 from dissipationSML import tools
+
+import regionmask as rm
+import ipywidgets as widgets
+import numpy as np
+import matplotlib.pyplot as plt
+from IPython.display import display, clear_output
+
 
 dir = os.path.dirname(os.path.realpath(__file__))
 plotting_style = f"{dir}/plotting.mplstyle"
@@ -86,7 +90,6 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
         gl.top_labels = False
         gl.right_labels = False
-        #plt.show()
 
     return fig, ax
 
@@ -162,7 +165,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
             density_raw = profile.SIGMA_T_RAW.values
             ### cut unrealistic values
             salinity_raw = np.where((salinity_raw > 35.5) | (salinity_raw < 34.8), np.nan, salinity_raw)
-            density_raw = np.where((density_raw > 28.5) | (density_raw < 27), np.nan, density_raw)
+            density_raw = np.where((density_raw > 28.5) | (density_raw < 26.5), np.nan, density_raw)
             mld_raw = tools.calculate_mixed_layer_depth(density_raw, depth)
             # Plot raw data
             ax1.plot(temperature_raw, depth, color='red', ls=':', label='Temperature Raw (°C)')
@@ -183,7 +186,6 @@ def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
         ax1.invert_yaxis()  # Pressure increases downward
 
         ax1.set_title(f'Profile {profile_num} ({glider}, mission: {mission})')
-        #plt.show()
 
     return fig, ax1, ax2, ax3
 
@@ -222,7 +224,7 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
 
         ## cut off unrealistic values
         salinity = np.where((salinity > 35.5) | (salinity < 34.8), np.nan, salinity)
-        density = np.where((density > 28.5) | (density < 27), np.nan, density)
+        density = np.where((density > 28.5) | (density < 26.5), np.nan, density)
 
         mld = tools.calculate_mixed_layer_depth(density, depth)
 
@@ -279,7 +281,6 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
         ax1.invert_yaxis()  # Pressure increases downward
 
         ax1.set_title(f'Profile {profile_num} ({glider}, mission: {mission})')
-        #plt.show()
 
     return fig, ax1, ax2, ax3
 
@@ -314,8 +315,6 @@ def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
         ax.set_xlabel('Vertical Distance (m)')
         ax.set_ylabel('Number of Measurements')
         ax.set_title(f'Profile {profile_num} Vertical Resolution')
-
-        #plt.show()
 
     return fig, ax
 
@@ -354,8 +353,6 @@ def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple
         ax[1].set_ylabel('Number of profiles')
         ax[1].set_title('Max depth per profile')
         [a.grid() for a in ax]
-        if force_plot:
-            plt.show()
     return fig, ax
 
 def plot_MLD_evolution(ds,binning = 1,use_raw = False, plot_density:bool = True) -> tuple:
@@ -426,4 +423,145 @@ def plot_MLD_evolution(ds,binning = 1,use_raw = False, plot_density:bool = True)
         plt.tight_layout()
     
     return fig, ax
+
+def plot_IFR_region_on_map(IFR_region: rm.Regions) -> tuple({plt.Figure, plt.Axes}):
+    """
+    This function plots the glider track on a map, with latitude and longitude colored by time.
+
+    Parameters
+    ----------
+    ds: xarray in OG1 format with at least TIME, LATITUDE, and LONGITUDE.
+    ax: Optional; axis to plot the data.
+    kw: Optional; additional keyword arguments for the scatter plot.
+
+    Returns
+    -------
+    One plot with the map of the glider track.
+    fig: matplotlib.figure.Figure
+    ax: matplotlib.axes._subplots.AxesSubplot
+    """
+   
+    fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()})
+    lon_lat_range = [-16, -6, 58, 67]
+
+    # plot the IFR region with numbers at each corner
+    IFR_region.plot(ax=ax, add_label=False, line_kws={'color': 'red'})
+
+    # Extract corner coordinates
+    coords = IFR_region[0].coords  # Get the first polygon's exterior (first 4 points)
+
+    # Add corner numbers
+    for i, (lon, lat) in enumerate(coords, start=1):  # Start numbering from 1
+        ax.text(lon, lat, str(i), fontsize=12, color='black', weight='bold',
+                ha='center', va='center', bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.3'))
+
+    ax.set_extent(lon_lat_range, crs=ccrs.PlateCarree())
+
+    # Add map features
+    ax.add_feature(cfeature.LAND, color='lightgray')
+    ax.add_feature(cfeature.OCEAN, color='lightblue')
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+
+    # Extract bathymetry data in the specified range
+    bath = bathymetry.sel(lon=slice(lon_lat_range[0], lon_lat_range[1]), 
+                            lat=slice(lon_lat_range[2], lon_lat_range[3]))
+
+    max_depth = np.min(bath.elevation.values)  # Depths are negative
+    levels = np.linspace(0, max_depth, 7)  # Generate 8 levels
+    rounded_levels = np.round(levels / 10) * 10  # Round levels to nearest 10
+
+    # Plot bathymetry contours
+    contours = bath.elevation.plot.contour(ax=ax, transform=ccrs.PlateCarree(), 
+                                               levels=rounded_levels, colors='black', linewidths=0.5)
+    # Add contour labels as positive values
+    ax.clabel(contours,fmt='%d m', fontsize=6, colors='black')
+    ### plot the bathymetry as a color map
+    #cmap = plt.get_cmap('viridis')
+    #bath.elevation.plot(ax=ax, transform=ccrs.PlateCarree(), cmap=cmap, add_colorbar=True)
+    ## add colorbar
+
+    ax.set_xlabel(f'Longitude')
+    ax.set_ylabel(f'Latitude')
+    ax.set_title('Glider Track')
+    gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
+    gl.top_labels = False
+    gl.right_labels = False
+
+    return fig, ax
+
+def interactive_region_selector(default_coords):
+    """
+    Creates an interactive widget with four coordinate sliders (longitude & latitude)
+    for defining a rectangular region. The region is only returned when the "Confirm Selection" button is clicked.
+
+    Parameters
+    ----------
+    default_coords : list
+        A list containing four pairs of default longitude and latitude values.
+
+    Returns
+    -------
+    function
+        A function `get_region()` that returns the selected `rm.Regions` object after confirmation.
+    """
+    
+    def create_coord_sliders(default_long, default_lat):
+        lat_slider = widgets.FloatSlider(description="Latitude", value=default_lat, min=58, max=67, orientation="vertical")
+        long_slider = widgets.FloatSlider(description="Longitude", value=default_long, min=-16, max=-6)
+        return widgets.VBox([lat_slider, long_slider])
+
+    # Create a tab widget
+    tab = widgets.Tab()
+    coordinates = [create_coord_sliders(lon, lat) for lon, lat in default_coords]
+    tab.children = coordinates
+
+    # Set tab titles
+    titles = ['First corner', 'Second corner', 'Third corner', 'Fourth corner']
+    for i in range(4):
+        tab.set_title(i, titles[i])
+
+    # Output widget for the plot
+    output = widgets.Output()
+
+    # Region storage (updated only on confirmation)
+    selected_region = {'region': None}
+
+    # Function to update the plot
+    def plot_rectangle():
+        with output:
+            clear_output(wait=True)  # Clear previous plot to prevent overlapping
+            coords = np.array([[tab.children[i].children[1].value, 
+                                tab.children[i].children[0].value] for i in range(4)])
+            region = rm.Regions([coords], names=['IFR'])
+
+            fig, ax = plot_IFR_region_on_map(region)
+            display(fig)
+            del fig, ax
+
+    # Function to store the confirmed region
+    def confirm_selection(b):
+        coords = np.array([[tab.children[i].children[1].value, 
+                            tab.children[i].children[0].value] for i in range(4)])
+        selected_region['region'] = rm.Regions([coords], names=['IFR'])
+        print("Region confirmed!")
+
+    # Confirmation button
+    confirm_button = widgets.Button(description="Confirm Selection")
+    confirm_button.on_click(confirm_selection)
+
+    # Attach event listeners to sliders for real-time plotting
+    for i in range(4):
+        for slider in tab.children[i].children:
+            slider.observe(lambda change: plot_rectangle(), names='value')
+
+    # Function to return the confirmed `rm.Regions` object
+    def get_region():
+        return selected_region['region']
+
+    # Display widgets and plot
+    display(tab, confirm_button, output)
+    plot_rectangle()
+    
+    return get_region
+
 

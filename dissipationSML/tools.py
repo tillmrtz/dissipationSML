@@ -2,6 +2,7 @@ import numpy as np
 import gsw
 import xarray as xr
 import tqdm
+import regionmask as rm
 
 def add_pot_density_from_raw_data(ds: xr.Dataset):
     """
@@ -164,10 +165,11 @@ def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, bi
     ds: xarray dataset with the additional variable MLD
     """
     mld_array = np.full(len(ds.N_MEASUREMENTS), np.nan)
-    max_profile = int(ds.PROFILE_NUMBER.max().values.item())
+    # Get unique profile numbers in the dataset
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
 
     # Initialize tqdm progress bar
-    for profile_number in tqdm.tqdm(range(1, max_profile + 1), desc="Calculating and adding MLD for Profiles", unit="profile"):
+    for profile_number in tqdm.tqdm(profile_numbers, desc="Calculating and adding MLD for Profiles", unit="profile"):
         profile = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
 
         if profile.N_MEASUREMENTS.size == 0:
@@ -216,3 +218,21 @@ def min_max_depth_per_profile(ds: xr.Dataset):
     max_depths.attrs['units'] = ds['DEPTH'].attrs['units']
     min_depths.attrs['units'] = ds['DEPTH'].attrs['units']
     return min_depths, max_depths
+
+def cut_region(ds: xr.Dataset,region: rm.Regions):
+    """
+    This function cuts the dataset to the region specified by the regionmask region
+
+    Parameters
+    ----------
+    ds: xarray dataset containing the data
+    region: regionmask region object specifying the region to cut to
+
+    Returns
+    -------
+    ds_region: xarray dataset containing the data only in the specified region
+    """
+    region_mask = region.mask(ds.LONGITUDE, ds.LATITUDE)
+    ds_region = ds.isel(N_MEASUREMENTS=region_mask == 0)
+
+    return ds_region
