@@ -142,12 +142,19 @@ def calculate_mixed_layer_depth(density: np.array, depth: np.array):
     # Density threshold
     threshold = 0.03
 
-    # Find the mixed layer depth (only analyzing depths below 10m)
-    for i in range(len(density_below_10m)):
-        if density_below_10m[i] > density_10m + threshold:
-            return depth_below_10m[i]  # Return first depth that exceeds threshold
+    ### find the first depth below 10m where the density exceeds the density at 10m by the threshold by using the linear interpolation
+    if np.nanmax(density_below_10m) < density_10m + threshold:
+        return np.nan
+    else:
+        MLD = linear_interpolation(density_below_10m, depth_below_10m, density_10m + threshold)
+        return MLD
 
-    return np.nan  # Return NaN if no depth satisfies the condition
+    # Find the mixed layer depth (only analyzing depths below 10m)
+    #for i in range(len(density_below_10m)):
+    #    if density_below_10m[i] > density_10m + threshold:
+    #        return depth_below_10m[i]  # Return first depth that exceeds threshold
+    #
+    #return np.nan  # Return NaN if no depth satisfies the condition
 
 
 def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, binning: float = 1,agg: str = 'mean'):
@@ -207,10 +214,6 @@ def min_max_depth_per_profile(ds: xr.Dataset):
     Returns
     -------
     max_depths: pandas dataframe containing the profile number and the maximum depth of that profile
-
-    Original author
-    ----------------
-    Till Moritz
     """
     max_depths = ds.groupby('PROFILE_NUMBER').apply(lambda x: x['DEPTH'].max())
     min_depths = ds.groupby('PROFILE_NUMBER').apply(lambda x: x['DEPTH'].min())

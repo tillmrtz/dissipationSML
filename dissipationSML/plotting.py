@@ -94,7 +94,7 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
     return fig, ax
 
 
-def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
+def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
     """
     Plots temperature, salinity, and density against pressure on a single plot with three x-axes.
 
@@ -104,7 +104,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
         Xarray dataset in OG1 format with at least PRESSURE, TEMPERATURE, SALINITY, and DENSITY.
     profile_num: int
         The profile number to plot.
-    plot_raw: bool
+    use_raw: bool
         If True, add the raw data to the plot.
     plot_binned: bool
         If True, add the binned data to the plot.
@@ -159,7 +159,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, plot_raw: bool) -> tuple:
 
         ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m)')
 
-        if plot_raw:
+        if use_raw:
             salinity_raw = profile.PSAL_RAW.values
             temperature_raw = profile.TEMP_RAW.values
             density_raw = profile.SIGMA_T_RAW.values
