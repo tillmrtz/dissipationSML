@@ -36,43 +36,53 @@ def add_pot_density_from_raw_data(ds: xr.Dataset):
     return ds
 
 
-def bin_data(ds_profile: xr.Dataset, resolution: float, use_raw: bool =False, agg: str = 'mean'):
+def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = 'mean'):
     """
-    Bin depth, temperature, salinity, and compute density using the GSW package while preserving the input data shape.
+    Bin the data in a profile dataset by depth using fixed depth steps.
     
-    Parameters:
-        ds_profile (xarray.Dataset): The dataset containing depth, temperature, and salinity data of one profile
-        resolution (float): The depth resolution for binning.
-        use_raw (bool): Whether to use raw temperature and salinity data.
-        agg (str): The aggregation method to use for binning. Default is 'mean'. Other option is 'median'.
+    Parameters
+    ----------
+        ds_profile: xr.Dataset 
+            The dataset containing at least **DEPTH and the variables to bin**.
+        resolution: float 
+            The depth resolution for the binning.
+        var: list
+            The variables to bin.
+        agg: str 
+            The aggregation method to use for binning. Default is 'mean'. Other option is 'median'.
 
-    Returns:
-        tuple: (binned_depths, binned_temperatures, binned_salinity, binned_density), where each is a numpy array with NaNs for unused indices.
+    Returns
+    -------
+        dict: A dictionary containing binned data arrays for each variable, including DEPTH.
+
+    Notes
+    -----
+    Original author: Till Moritz
     """
-    if use_raw:
-        temperature = ds_profile.TEMP_RAW
-        salinity = ds_profile.PSAL_RAW
-        density = ds_profile.SIGMA_T_RAW
-    else:
-        temperature = ds_profile.TEMP
-        salinity = ds_profile.PSAL
-        density = ds_profile.SIGMA_T
+    # Remove empty strings from vars list
+    vars = [var for var in vars if var]
 
-    depth = ds_profile.DEPTH
-    pressure = ds_profile.PRES
-    ### group depth values into discrete intervals for analysis with the given resolution
-    bins = np.arange(np.floor(np.min(depth) / resolution) * resolution,
-                     np.ceil(np.max(depth) / resolution) * resolution + resolution,resolution)
+    # Define bin edges and bin centers
+    min_depth = np.floor(ds_profile.DEPTH.min() / resolution) * resolution
+    max_depth = np.ceil(ds_profile.DEPTH.max() / resolution) * resolution
+    bins = np.arange(min_depth, max_depth + resolution, resolution)
+    bin_centers = bins[:-1] + resolution / 2  # Set depth values to bin centers
 
-    variables = {"pressure": pressure,"depths": depth,"temperatures": temperature,"salinity": salinity,"density": density}
-    if agg == 'mean':
-        binned_data = {name: var.groupby_bins('DEPTH', bins).mean().values for name, var in variables.items()}
-    elif agg == 'median':
-        binned_data = {name: var.groupby_bins('DEPTH', bins).median().values for name, var in variables.items()}
-    else:
-        raise ValueError(f"Invalid aggregation method: {agg}")
-    
-    return binned_data["depths"], binned_data["temperatures"], binned_data["salinity"], binned_data["density"]
+    # Group variables by depth bins and apply aggregation
+    binned_data = {}
+    for name in vars:
+        grouped = ds_profile[name].groupby_bins('DEPTH', bins)
+        if agg == 'mean':
+            binned_data[name] = grouped.mean().values
+        elif agg == 'median':
+            binned_data[name] = grouped.median().values
+        else:
+            raise ValueError(f"Invalid aggregation method: {agg}")
+
+    # Assign bin centers as the new depth values
+    binned_data['DEPTH'] = bin_centers
+
+    return binned_data
 
 def linear_interpolation(x, y, x_new):
     """
@@ -155,6 +165,85 @@ def calculate_mixed_layer_depth(density: np.array, depth: np.array):
     #        return depth_below_10m[i]  # Return first depth that exceeds threshold
     #
     #return np.nan  # Return NaN if no depth satisfies the condition
+
+
+def compute_CR(depth, h, sigma1):
+    """
+    Compute CR up to the reference depth h.
+    
+    Parameters:
+    depth: array-like 
+        Depth values corresponding to sigma1 in meters.
+    h: float
+        Reference depth up to which CR is computed.
+    sigma1: array-like 
+        Potential density anomaly σ₁(S,θ,z) in kg/m³.
+    
+    Returns:
+    float: Computed CR up to the reference depth h.
+    """
+
+    # Ensure h is within the depth range
+    if h > np.nanmax(depth):
+        raise ValueError("h exceeds the available depth range!")
+    
+    ### Mask NaN values
+    mask = ~np.isnan(depth) & ~np.isnan(sigma1)
+    depth = depth[mask]
+    sigma1 = sigma1[mask]
+
+    # Sort depth and density together
+    sort_idx = np.argsort(depth)
+    depth = depth[sort_idx]
+    sigma1 = sigma1[sort_idx]
+
+    # Mask values where depth is shallower than h (i.e., between -h and 0)
+    mask = (depth <= h) & (depth >= 0)
+
+    # Integrate σ₁(S,θ,z) over depth using the trapezoidal rule
+    integral = np.trapz(sigma1[mask], depth[mask])
+
+    # Interpolate σ₁ at depth h
+    sigma1_h = np.interp(h, depth, sigma1)
+
+    # Compute CR(h)
+    CR_h = integral - h * sigma1_h
+
+    return CR_h
+
+def calculate_CR_for_all_depth(depth,sigma1):
+    CR = []
+    for h in depth:
+        CR_h = compute_CR(depth, h, sigma1)
+        CR.append(CR_h)
+    return CR
+
+def calculate_MLD_with_CR(density: np.array, depth: np.array, sigma_0: float = 27.553558):
+    """
+    Calculate the mixed layer depth (MLD) using the convective resistance (CR) method.
+    
+    Parameters:
+    density: array-like 
+        Density values in kg/m³.
+    depth: array-like 
+        Depth values in meters.
+    sigma_0: float
+        Reference density in kg/m³.
+    
+    Returns:
+    float: Mixed layer depth (MLD) in meters.
+    """
+    # Compute the potential density anomaly σ₁(S,θ,z)
+    sigma1 = density - sigma_0
+    
+    # Compute CR up to the reference depth h
+    CR = calculate_CR_for_all_depth(depth, sigma1)
+    
+    # Find the depth where CR exceeds the critical value
+    mask = np.array(CR) < - 0.1
+    MLD = np.min(depth[mask])
+    
+    return MLD
 
 
 def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, binning: float = 1,agg: str = 'mean'):

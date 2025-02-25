@@ -128,8 +128,10 @@ def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
         temperatures = profile.TEMP.values
         salinity = profile.PSAL.values
         density = profile.SIGMA_T.values
+        #sigma0 = profile.SIGMA_T.mean().values
 
         mld = tools.calculate_mixed_layer_depth(density, depth)
+        mld_CR = tools.calculate_MLD_with_CR(density, depth)
 
         mission = ds.id.split('_')[1][0:8]
         glider = ds.id.split('_')[0]
@@ -157,8 +159,6 @@ def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
         ax3.spines['top'].set_visible(False)  # Hide top spine
         ax3.spines['bottom'].set_position(('axes', -0.14))
 
-        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m)')
-
         if use_raw:
             salinity_raw = profile.PSAL_RAW.values
             temperature_raw = profile.TEMP_RAW.values
@@ -166,13 +166,16 @@ def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
             ### cut unrealistic values
             salinity_raw = np.where((salinity_raw > 35.5) | (salinity_raw < 34.8), np.nan, salinity_raw)
             density_raw = np.where((density_raw > 28.5) | (density_raw < 26.5), np.nan, density_raw)
-            mld_raw = tools.calculate_mixed_layer_depth(density_raw, depth)
+            mld = tools.calculate_mixed_layer_depth(density_raw, depth)
+            mld_CR = tools.calculate_MLD_with_CR(density_raw, depth)
             # Plot raw data
             ax1.plot(temperature_raw, depth, color='red', ls=':', label='Temperature Raw (°C)')
             ax2.plot(salinity_raw, depth, color='blue', ls=':', label='Salinity Raw (PSU)')
             ax3.plot(density_raw, depth, color='grey', ls=':', label='Density Anomaly Raw (kg/m³)')
-            ax1.axhline(y=mld_raw, color='black', linestyle=':', label=f'MLD Raw ({round(mld_raw,1)} m)')
+            #ax1.axhline(y=mld_raw, color='black', linestyle=':', label=f'MLD Raw ({round(mld_raw,1)} m)')
 
+        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m) from density threshold')
+        ax1.axhline(y=mld_CR, color='black', linestyle=':', label=f'MLD ({round(mld_CR,1)} m) from CR')
         ### make a legend for all axes that are not on top of each other
         #[ax.legend(fontsize = 10) for ax in [ax1, ax2, ax3]]
         fig.legend(fontsize = 10)
@@ -218,15 +221,25 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
 
         # Select the specific profile
         profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
+        #sigma_0 = profile.SIGMA_T.mean().values
+        if use_raw:
+            vars = ['TEMP_RAW','PSAL_RAW','SIGMA_T_RAW']
+        else:
+            vars = ['TEMP','PSAL','SIGMA_T']
 
-        depth, temperature, salinity, density = tools.bin_data(ds_profile = profile,
-                                                                resolution=binning , use_raw= use_raw, agg=agg)
+        binned_data = tools.bin_data(ds_profile = profile,vars=vars, resolution=binning, agg=agg)
+
+        depth = binned_data['DEPTH']
+        temperature = binned_data[vars[0]]
+        salinity = binned_data[vars[1]]
+        density = binned_data[vars[2]]
 
         ## cut off unrealistic values
         salinity = np.where((salinity > 35.5) | (salinity < 34.8), np.nan, salinity)
         density = np.where((density > 28.5) | (density < 26.5), np.nan, density)
 
         mld = tools.calculate_mixed_layer_depth(density, depth)
+        mld_CR = tools.calculate_MLD_with_CR(density, depth)
 
         msk = np.isnan(depth)
         depth = depth[~msk]
@@ -266,7 +279,8 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
         ax3.spines['top'].set_visible(False)  # Hide top spine
         ax3.spines['bottom'].set_position(('axes', -0.14))
         ### add a line for the mixed layer depth
-        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m)')
+        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m) from density threshold')
+        ax1.axhline(y=mld_CR, color='black', linestyle=':', label=f'MLD ({round(mld_CR,1)} m) from CR')
 
         ### make a legend for all axes that are not on top of each other
         #[ax.legend(fontsize = 10) for ax in [ax1, ax2, ax3]]
