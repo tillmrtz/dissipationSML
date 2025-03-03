@@ -49,9 +49,13 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         else:
             fig = plt.gcf()
 
-        latitudes = ds.LATITUDE.values
-        longitudes = ds.LONGITUDE.values
-        times = ds.TIME.values
+        #latitudes = ds.LATITUDE.values
+        #longitudes = ds.LONGITUDE.values
+        #times = ds.TIME.values
+        ### extract only the mean values for longitude, latitude and time for each profile
+        latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+        longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+        times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
 
         # Plot latitude and longitude colored by time
         sc = ax.scatter(longitudes, latitudes, c=times, cmap='viridis',s=10, **kw)
@@ -578,4 +582,40 @@ def interactive_region_selector(default_coords):
     
     return get_region
 
+
+def plot_dive_depth(ds, dive_number):
+    """
+    This function plots the depth of one dive against time.
+    
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least TIME, DEPTH, and DIVE_NUMBER.
+    dive_number: int
+        The dive number to plot.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax: matplotlib.axes.Axes
+        The axis object containing the primary plot.
+    """
+    with plt.style.context(plotting_style):
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Select the specific dive
+        dive = ds.sel(N_MEASUREMENTS = ds.DIVE_NUMBER == dive_number, drop=True)
+        time = dive.TIME.values
+        depth = dive.DEPTH.values
+
+        # Plot depth against time
+        dive.plot.scatter(x='TIME', y='DEPTH', ax=ax, color='blue', s=10)
+        ax.invert_yaxis()
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Depth (m)')
+        ax.set_title(f'Dive {dive_number} Depth Profile')
+        ### only plot the time at the x-ticks and the date at the x-labels
+        ax.grid(True)
+    return fig, ax
 

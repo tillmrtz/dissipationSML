@@ -6,7 +6,7 @@ import regionmask as rm
 from matplotlib import pyplot as plt
 from cartopy import crs as ccrs
 from cartopy import feature as cfeature
-from dissipationSML.plotting import plot_IFR_region_on_map, plot_profile_binned, plot_profile, plot_vertical_resolution
+from dissipationSML.plotting import plot_IFR_region_on_map, plot_profile_binned, plot_profile, plot_vertical_resolution, plot_dive_depth
 
 
 def load_glider_config(yaml_path):
@@ -92,7 +92,7 @@ def interactive_profile(ds, profile_slider, raw_button):
     def interactive_unbinned(profile_number, use_raw):
         """Plots the selected profile."""
         fig, ax1, ax2, ax3 = plot_profile(ds, profile_number, use_raw)
-        display(fig)
+        #display(fig)
         del fig, ax1, ax2, ax3
 
     # Create interactive widget connection
@@ -118,7 +118,7 @@ def interactive_profile_binned(ds, profile_slider, binning_slider, raw_button, a
     def interactive_binned(profile_number, binning, use_raw, agg):
         """Plots the selected profile."""
         fig, ax1, ax2, ax3 = plot_profile_binned(ds, profile_number, binning, use_raw, agg)
-        display(fig)
+        #display(fig)
         del fig, ax1, ax2, ax3
 
     # Create interactive widget connection
@@ -137,11 +137,33 @@ def interactive_resolution_hist(ds, profile_slider):
     """
     def interactive_res(profile_number):
         fig, ax = plot_vertical_resolution(ds, profile_number)
-        display(fig)
+        #display(fig)
         del fig, ax
     
     # Create interactive widget connection
     ui = widgets.interactive(interactive_res, profile_number=profile_slider)
+    display(ui)
+
+def interactive_dive_profile(ds, dive_slider):
+    """
+    Creates an interactive depth profile viewer using ipywidgets.
+
+    Parameters:
+        ds : xarray.Dataset
+            The dataset containing profile information.
+        dive_slider : widgets.SelectionSlider
+            Slider to select the dive number.
+        raw_button : widgets.Checkbox
+            Checkbox to toggle raw data.
+    """
+    def plot_dive_profile(dive_number):
+        """Plots the selected depth profile."""
+        fig, ax = plot_dive_depth(ds, dive_number)
+        #display(fig)
+        del fig, ax
+    
+    # Create interactive widget connection
+    ui = widgets.interactive(plot_dive_profile, dive_number=dive_slider)
     display(ui)
 
 

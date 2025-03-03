@@ -328,3 +328,71 @@ def cut_region(ds: xr.Dataset,region: rm.Regions):
     ds_region = ds.isel(N_MEASUREMENTS=region_mask == 0)
 
     return ds_region
+
+
+def match_era5_to_glider(ds_glider, ds_ERA5, lon_range=None, lat_range=None):
+    """
+    Matches ERA5 data to glider profiles, either using nearest points or averaging within a spatial range.
+
+    Parameters
+    ----------
+    ds_glider : xarray.Dataset
+        The dataset containing glider data.
+    ds_ERA5 : xarray.Dataset
+        The ERA5 dataset to be matched.
+    lon_range : float or None, optional
+        The range (in degrees) for longitude to average ERA5 data. If None, selects the nearest point.
+    lat_range : float or None, optional
+        The range (in degrees) for latitude to average ERA5 data. If None, selects the nearest point.
+
+    Returns
+    -------
+    xarray.Dataset
+        The matched ERA5 data with the same PROFILE_NUMBER dimension as the glider dataset.
+    """
+    # Compute mean time, longitude, and latitude per profile
+    mean_time = ds_glider.TIME.groupby(ds_glider.PROFILE_NUMBER).mean()
+    mean_lon = ds_glider.LONGITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
+    mean_lat = ds_glider.LATITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
+
+    profiles = np.unique(ds_glider.PROFILE_NUMBER)
+
+    if lon_range or lat_range:
+        ds_matched_all = []
+        for profile in tqdm(profiles, desc="Matching profiles"):
+            lon = mean_lon.sel(PROFILE_NUMBER=profile, drop=True).values
+            lat = mean_lat.sel(PROFILE_NUMBER=profile, drop=True).values
+            time = mean_time.sel(PROFILE_NUMBER=profile, drop=True).values
+
+            # Select nearest valid_time
+            ds_matched = ds_ERA5.sel(valid_time=time, method="nearest")
+
+            # Select longitude and latitude range if provided
+            if lon_range:
+                ds_matched = ds_matched.sel(longitude=slice(lon - lon_range, lon + lon_range))
+            if lat_range:
+                ds_matched = ds_matched.sel(latitude=slice(lat - lat_range, lat + lat_range))
+
+            # Compute mean over the selected region
+            ds_matched = ds_matched.mean(dim=["latitude", "longitude", "time"], skipna=True)
+
+            # Add profile number, longitude, and latitude as coordinates
+            ds_matched = ds_matched.assign_coords(PROFILE_NUMBER=profile, longitude=lon, latitude=lat)
+            ds_matched_all.append(ds_matched)
+
+        # Concatenate all profiles along PROFILE_NUMBER
+        ds_matched = xr.concat(ds_matched_all, dim="PROFILE_NUMBER")
+    else:
+        # Match without tolerance (nearest selection)
+        ds_matched = ds_ERA5.sel(valid_time=mean_time, longitude=mean_lon, latitude=mean_lat, method="nearest")
+        ds_matched = ds_matched.mean(dim="time")
+
+    # Preserve attributes
+    ds_matched.attrs = ds_ERA5.attrs
+    ds_matched.attrs["longitude_range_used"] = f"±{lon_range} degrees" if lon_range else "Nearest longitude point"
+    ds_matched.attrs["latitude_range_used"] = f"±{lat_range} degrees" if lat_range else "Nearest latitude point"
+
+    for var in ds_ERA5.variables:
+        ds_matched[var].attrs = ds_ERA5[var].attrs
+
+    return ds_matched
