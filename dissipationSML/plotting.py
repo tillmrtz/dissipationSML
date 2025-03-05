@@ -24,6 +24,32 @@ dir = os.path.dirname(os.path.realpath(__file__))
 plotting_style = f"{dir}/plotting.mplstyle"
 bathymetry = xr.open_dataset(f"{dir}/GEBCO_2024_IFR.nc")
 
+def get_bathymetry_levels(bath, level_spacing=250):
+        """
+        This function computes the bathymetry levels for a given bathymetry dataset.
+
+        Parameters
+        ----------
+        bath: xarray.Dataset
+            Bathymetry dataset with 'elevation' variable.
+        level_spacing: int, optional
+            The spacing between contour levels. Default is 250 m.
+
+        Returns
+        -------
+        levels: numpy.ndarray
+            An array of bathymetry levels.
+        contour_levels: numpy.ndarray
+            An array of contour levels.
+        max_level: int
+            The maximum bathymetry level.
+        """
+        max_depth = np.max(bath.elevation.values)  # Depths are negative
+        max_level = level_spacing * (np.round(max_depth / level_spacing) + 1)
+        levels = np.arange(0, max_level, level_spacing)
+        contour_levels = levels[::2]  # Every second level
+        return levels, contour_levels, max_level
+
 def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple({plt.Figure, plt.Axes}):
     """
     This function plots the glider track on a map, with latitude and longitude colored by time. Contour lines are added to the plot.
@@ -42,55 +68,66 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         The figure object containing the plot.
     ax: matplotlib.axes.Axes
         The axis object containing the primary plot.
+    
     """
     with plt.style.context(plotting_style):
+        # Create figure and axis
         if ax is None:
             fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()})
         else:
             fig = plt.gcf()
 
-        #latitudes = ds.LATITUDE.values
-        #longitudes = ds.LONGITUDE.values
-        #times = ds.TIME.values
-        ### extract only the mean values for longitude, latitude and time for each profile
+        # Extract profile mean values
         latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
         longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
         times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
 
-        # Plot latitude and longitude colored by time
-        sc = ax.scatter(longitudes, latitudes, c=times, cmap='viridis',s=10, **kw)
-
-        # Add colorbar with formatted time labels
-        cbar = plt.colorbar(sc, ax=ax) #, label='Time')
-        cbar.ax.set_yticklabels([pd.to_datetime(t).strftime('%Y-%b-%d') for t in cbar.get_ticks()])
-
-        lon_lat_range = [np.min(longitudes)-1, np.max(longitudes)+1, np.min(latitudes)-1, np.max(latitudes)+1]
-
+        # Define map extent
+        lon_lat_range = [
+            np.min(longitudes) - 1, np.max(longitudes) + 1, 
+            np.min(latitudes) - 1, np.max(latitudes) + 1
+        ]
         ax.set_extent(lon_lat_range, crs=ccrs.PlateCarree())
 
-        # Add map features
-        ax.add_feature(cfeature.LAND, color='lightgray')
-        ax.add_feature(cfeature.OCEAN, color='lightblue')
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
-
-        # Extract bathymetry data in the specified range
+        # Extract bathymetry data
         bath = bathymetry.sel(lon=slice(lon_lat_range[0], lon_lat_range[1]), 
                               lat=slice(lon_lat_range[2], lon_lat_range[3]))
 
-        max_depth = np.min(bath.elevation.values)  # Depths are negative
-        levels = np.linspace(0, max_depth, 7)  # Generate 8 levels
-        rounded_levels = np.round(levels / 10) * 10  # Round levels to nearest 10
+        # Compute bathymetry levels
+        levels, contour_levels, max_level = get_bathymetry_levels(bath)
 
-        # Plot bathymetry contours
-        contours = bath.elevation.plot.contour(ax=ax, transform=ccrs.PlateCarree(), 
-                                               levels=rounded_levels, colors='black', linewidths=0.5)
-        # Add contour labels as positive values
-        ax.clabel(contours,fmt='%d m', fontsize=6, colors='black')
-        
+        # Plot bathymetry as color mesh
+        cmap = plt.get_cmap('Blues', len(levels))
+        pcm = ax.pcolormesh(
+            bath.lon, bath.lat, abs(bath.elevation.values), 
+            cmap=cmap, vmin=0, vmax=max_level, transform=ccrs.PlateCarree())
 
-        ax.set_xlabel(f'Longitude')
-        ax.set_ylabel(f'Latitude')
-        ax.set_title('Glider Track')
+        # Plot bathymetry contour lines
+        ax.contour(
+            bath.lon, bath.lat, abs(bath.elevation.values), 
+            levels=contour_levels, colors='black', linewidths=0.5, transform=ccrs.PlateCarree())
+
+        # Plot glider track (colored by time)
+        sc = ax.scatter(longitudes, latitudes, c=times, cmap='viridis', s=10, **kw)
+
+        # Colorbar for time (formatted date labels)
+        cbar = plt.colorbar(sc, ax=ax)
+        cbar.ax.set_yticklabels([pd.to_datetime(t).strftime('%Y-%b-%d') for t in cbar.get_ticks()])
+
+        # Colorbar for bathymetry
+        cbar_bath = plt.colorbar(pcm, ax=ax, label='Depth (m)', pad=0.02, shrink=0.8)
+        cbar_bath.set_ticks(levels)
+
+        # Add map features
+        ax.add_feature(cfeature.LAND, color='lightgray', zorder=10)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=11)
+
+        # Labels and title
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.set_title('Glider Track with Bathymetry')
+
+        # Gridlines
         gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
         gl.top_labels = False
         gl.right_labels = False
@@ -373,7 +410,7 @@ def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple
         [a.grid() for a in ax]
     return fig, ax
 
-def plot_MLD_evolution(ds,binning = 1,use_raw = False, plot_density:bool = True) -> tuple:
+def plot_MLD_evolution(ds,binning = None,use_raw = False, plot_density:bool = True) -> tuple:
     """
     This function plots the evolution of the mixed layer depth over time.
 
@@ -398,19 +435,21 @@ def plot_MLD_evolution(ds,binning = 1,use_raw = False, plot_density:bool = True)
     for i in np.unique(ds.PROFILE_NUMBER):
         profile = ds.where(ds.PROFILE_NUMBER == i, drop=True)
         time.append(profile.TIME.values[0])
-        if binning >= 1:
-            depth,_,_,density = tools.bin_data(profile, resolution=binning, use_raw=use_raw)
-            mld.append(tools.calculate_mixed_layer_depth(density, depth))
+        if use_raw:
+            vars = ['SIGMA_T_RAW']
         else:
-            if use_raw:
-                density = profile.SIGMA_T_RAW.values
-                depth = profile.DEPTH.values
-                mld.append(tools.calculate_mixed_layer_depth(density, depth))
-            else:   
-                density = profile.SIGMA_T.values
-                depth = profile.DEPTH.values
-                mld.append(tools.calculate_mixed_layer_depth(density, depth))
+            vars = ['SIGMA_T']
 
+        if binning:
+            binned_data = tools.bin_data(ds_profile = profile,vars=vars, resolution=binning, agg='mean')
+            depth = binned_data['DEPTH']
+            density = binned_data[vars[0]]
+        else:
+            depth = profile.DEPTH.values
+            density = profile.SIGMA_T.values
+
+        mld.append(tools.calculate_mixed_layer_depth(density, depth))
+        
     with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
         fig, ax = plt.subplots(figsize=(18, 8), sharex=True)
         ax.plot(time, mld, color = 'black', label='MLD')                   

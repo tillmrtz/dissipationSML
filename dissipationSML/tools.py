@@ -233,6 +233,9 @@ def calculate_MLD_with_CR(density: np.array, depth: np.array, sigma_0: float = 2
     Returns:
     float: Mixed layer depth (MLD) in meters.
     """
+    # Check for empty arrays after removing NaNs
+    if depth.size == 0 or density.size == 0:
+        return np.nan
     # Compute the potential density anomaly σ₁(S,θ,z)
     sigma1 = density - sigma_0
     

@@ -92,7 +92,7 @@ def interactive_profile(ds, profile_slider, raw_button):
     def interactive_unbinned(profile_number, use_raw):
         """Plots the selected profile."""
         fig, ax1, ax2, ax3 = plot_profile(ds, profile_number, use_raw)
-        #display(fig)
+        display(fig)
         del fig, ax1, ax2, ax3
 
     # Create interactive widget connection
@@ -118,7 +118,7 @@ def interactive_profile_binned(ds, profile_slider, binning_slider, raw_button, a
     def interactive_binned(profile_number, binning, use_raw, agg):
         """Plots the selected profile."""
         fig, ax1, ax2, ax3 = plot_profile_binned(ds, profile_number, binning, use_raw, agg)
-        #display(fig)
+        display(fig)
         del fig, ax1, ax2, ax3
 
     # Create interactive widget connection
@@ -137,7 +137,7 @@ def interactive_resolution_hist(ds, profile_slider):
     """
     def interactive_res(profile_number):
         fig, ax = plot_vertical_resolution(ds, profile_number)
-        #display(fig)
+        display(fig)
         del fig, ax
     
     # Create interactive widget connection
@@ -159,7 +159,7 @@ def interactive_dive_profile(ds, dive_slider):
     def plot_dive_profile(dive_number):
         """Plots the selected depth profile."""
         fig, ax = plot_dive_depth(ds, dive_number)
-        #display(fig)
+        display(fig)
         del fig, ax
     
     # Create interactive widget connection
