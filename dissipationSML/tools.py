@@ -4,34 +4,63 @@ import xarray as xr
 import tqdm
 import regionmask as rm
 
-def add_pot_density_from_raw_data(ds: xr.Dataset):
+def add_pot_densities(ds: xr.Dataset, use_raw: bool = True):
     """
-    This function computes the potential density and its anomaly with respect to the reference pressure of 0 dbar
-    using the raw temperature and salinity data. The two new variables are added to the dataset.
+    This function computes the potential density and its anomaly with respect to 0 dbar and 1000 dbar
+    from the salinity and temperature data in the dataset. The computed values are added to the dataset if they do not
+    already exist.
 
     Parameters
     ----------
     ds: xarray dataset containing the raw temperature and salinity data
+    use_raw: bool
+        If True, the function uses the raw temperature and salinity data to compute the potential density.
+        If False, the function uses the corrected temperature and salinity data to compute the potential density
 
     Returns
     -------
     ds: xarray dataset with the additional variables SIG_THETA_RAW and SIGMA_T_RAW
 
     """
-    PSAL = ds.PSAL_RAW.values
-    TEMP = ds.TEMP_RAW.values
+    vars = ['PSAL', 'TEMP']
+    if use_raw:
+        vars = [var + '_RAW' for var in vars]
+    
+    PSAL = ds[vars[0]].values
+    TEMP = ds[vars[1]].values
     PRES = ds.PRES.values
     lon = ds.LONGITUDE
     lat = ds.LATITUDE
     CT = gsw.CT_from_t(PSAL, TEMP, PRES)  # Conservative temperature
-    SA = gsw.SA_from_SP(PSAL,TEMP, lon, lat)  # Absolute salinity  
-    SIGTHETA_RAW = gsw.pot_rho_t_exact(SA, TEMP, PRES, 0)  # Potential density
-    SIGMA_T_RAW = gsw.density.sigma0(SA, CT)
+    SA = gsw.SA_from_SP(PSAL,TEMP, lon, lat)  # Absolute salinity
+    SIGTHETA = gsw.pot_rho_t_exact(SA, TEMP, PRES, 0)  # Potential density
+    SIGMA_T = gsw.density.sigma0(SA, CT)
+    SIGMA_1 = gsw.density.sigma1(SA, CT)
+    calculated = {'SIGTHETA': SIGTHETA, 'SIGMA_T': SIGMA_T, 'SIGMA_1': SIGMA_1}
 
-    ds['SIGTHETA_RAW'] = xr.DataArray(SIGTHETA_RAW, dims=('N_MEASUREMENTS'),
-                         attrs={'units': 'kg/m^3', 'long_name': 'potential density with respect to 0 dbar'})
-    ds['SIGMA_T_RAW'] = xr.DataArray(SIGMA_T_RAW, dims=('N_MEASUREMENTS'), 
-                         attrs={'units': 'kg/m^3', 'long_name': 'potential density anomaly with respect to 0 dbar'})
+    for var in calculated:
+        ### add only if the variable is not already in the dataset
+        if use_raw:
+            var_name = var + '_RAW'
+        else:
+            var_name = var
+        if var_name in ds:
+            continue
+        if var == 'SIGTHETA':
+            long_name = 'potential density with respect to 0 dbar'
+        elif var == 'SIGMA_T':
+            long_name = 'potential density anomaly with respect to 0 dbar'
+        elif var == 'SIGMA_1':
+            long_name = 'potential density anomaly with respect to 1000 dbar'
+        ds[var_name] = xr.DataArray(calculated[var], dims=('N_MEASUREMENTS'),
+                               attrs={'units': 'kg/m^3', 'long_name': long_name})
+
+    #ds['SIGTHETA_RAW'] = xr.DataArray(SIGTHETA_RAW, dims=('N_MEASUREMENTS'),
+    #                     attrs={'units': 'kg/m^3', 'long_name': 'potential density with respect to 0 dbar'})
+    #ds['SIGMA_T_RAW'] = xr.DataArray(SIGMA_T_RAW, dims=('N_MEASUREMENTS'), 
+    #                     attrs={'units': 'kg/m^3', 'long_name': 'potential density anomaly with respect to 0 dbar'})
+    #ds['SIGMA_1_RAW'] = xr.DataArray(SIGMA_1_RAW, dims=('N_MEASUREMENTS'),
+    #                        attrs={'units': 'kg/m^3', 'long_name': 'potential density anomaly with respect to 1000 dbar'})
 
     return ds
 
