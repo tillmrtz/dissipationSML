@@ -77,10 +77,16 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         else:
             fig = plt.gcf()
 
-        # Extract profile mean values
-        latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-        longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-        times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
+        ## if dim is PROFILE_NUMBER, just take latitude, longitude and time values directly
+        if 'PROFILE_NUMBER' in ds.dims:
+            latitudes = ds.LATITUDE.values
+            longitudes = ds.LONGITUDE.values
+            times = ds.TIME.values
+        else:
+            # Extract profile mean values
+            latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+            longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+            times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
 
         # Define map extent
         lon_lat_range = [
@@ -657,4 +663,130 @@ def plot_dive_depth(ds, dive_number):
         ### only plot the time at the x-ticks and the date at the x-labels
         ax.grid(True)
     return fig, ax
+
+def plot_histograms(ds, vars: list, bins: int):
+    """
+    This function plots histograms for the specified variables in a dataset.
+    It also computes the sample mean, standard deviation (sigma), and variance (sigma^2),
+    and adds them as vertical lines.
+
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset with the variables to plot.
+    vars: list
+        A list of variable names to plot.
+    bins: int
+        The number of bins for the histograms.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    axes: list
+        List of axis objects containing the plots.
+    """
+    num_vars = len(vars)
+    cols = 2  # Number of columns per row
+    rows = int(np.ceil(num_vars / cols))  # Determine number of rows needed
+
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 6 * rows))  # Adjust figure size dynamically
+    axes = axes.flatten() if num_vars > 1 else [axes]  # Flatten in case of multiple subplots
+
+    for i, var in enumerate(vars):
+        ax = axes[i]
+        data = ds[var].values.flatten()  # Convert to NumPy array for calculations
+        
+        mean_value = np.nanmean(data)  # Compute sample mean, ignoring NaNs
+        std_dev = np.nanstd(data)  # Compute standard deviation (sigma), ignoring NaNs
+        variance = std_dev ** 2  # Compute variance (sigma^2)
+
+        ds[var].plot.hist(ax=ax, bins=bins, alpha=0.5, label=var)
+
+        # Add vertical lines for mean and ± sigma (standard deviation)
+        ax.axvline(mean_value, color='r', linestyle='dashed', linewidth=2, label=f'Mean μ: {mean_value:.2f}')
+        ax.axvline(mean_value + std_dev, color='g', linestyle='dotted', linewidth=2, label=f'Std dev. σ: {std_dev:.2f}')
+        ax.axvline(mean_value - std_dev, color='g', linestyle='dotted', linewidth=2)
+
+        # Fetch description (long_name) from variable attributes
+        var_desc = ds[var].attrs.get("long_name", var)
+        unit = ds[var].attrs.get("units", "")
+
+        # Update title to include mean, variance (σ²), and standard deviation (σ)
+        ax.set_title(f"Histogram of {var_desc}\nμ={mean_value:.2f}, σ={std_dev:.2f}, σ²={variance:.2f}")
+
+        ax.set_xlabel(f'{var} ({unit})')
+        ax.set_ylabel('Frequency')
+        ax.legend()
+
+    # Remove any empty subplots if variables are not a multiple of cols
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    return fig, axes
+
+def plot_filtered_data(ds_filtered, vars, time_range=None):
+    """
+    Plots the original, filtered, and residual (difference) data for the given variables.
+    The residual is plotted separately below the main plots.
+
+    Parameters
+    ----------
+    ds_filtered : xarray.Dataset
+        The dataset containing both the original and filtered variables.
+    vars : list of str
+        The variable names to plot (e.g., ['u10', 'v10']).
+    time_range : tuple of str (optional)
+        A tuple specifying the time range (start, end) in a format recognized by xarray (e.g., '2008-12-01', '2008-12-31').
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure object containing the plots.
+    axes : list
+        The list of axes objects.
+    """
+    num_vars = len(vars)
+
+    # Apply time range if specified
+    if time_range:
+        ds_filtered = ds_filtered.sel(valid_time=slice(*time_range))
+
+    # Create subplots: 2 rows per variable (original+filtered and residual)
+    fig, axes = plt.subplots(num_vars * 2, 1, figsize=(20, 8 * num_vars), sharex=True)
+
+    if num_vars == 1:
+        axes = [axes]  # Ensure axes is always iterable
+
+    for i, var in enumerate(vars):
+        ax_main = axes[i * 2]  # Main plot (original + filtered)
+        ax_residual = axes[i * 2 + 1]  # Residual plot
+
+        residual = ds_filtered[var] - ds_filtered[f"{var}_hann_filtered"]
+
+        # Plot original and filtered data
+        ds_filtered[var].plot(ax=ax_main, label="Original", color="C0", linewidth=2)
+        ds_filtered[f"{var}_hann_filtered"].plot(ax=ax_main, label="Filtered", color="C1", linewidth=2)
+
+        ax_main.legend()
+        ax_main.set_title(f"{var} (Original & Filtered)")
+        ax_main.set_ylabel("m/s")
+
+        # Plot residual separately
+        residual.plot(ax=ax_residual, label="Residual", color="C2", linestyle="dashed")
+        ax_residual.legend()
+        ax_residual.set_title(f"{var} Residual (Original - Filtered)")
+        ax_residual.set_ylabel("Residual (m/s)")
+
+    axes[-1].set_xlabel("Time")  # Set xlabel only on the last subplot
+    plt.tight_layout()
+    plt.show()
+
+    return fig, axes
+
+
+
+
+
 

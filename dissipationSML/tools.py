@@ -3,6 +3,8 @@ import gsw
 import xarray as xr
 import tqdm
 import regionmask as rm
+from scipy.signal import convolve
+from scipy.signal.windows import hann
 
 def add_pot_densities(ds: xr.Dataset, use_raw: bool = True):
     """
@@ -89,17 +91,22 @@ def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = '
     Original author: Till Moritz
     """
     # Remove empty strings from vars list
-    vars = [var for var in vars if var]
+    #vars = [var for var in vars if var]
 
     # Define bin edges and bin centers
     min_depth = np.floor(ds_profile.DEPTH.min() / resolution) * resolution
     max_depth = np.ceil(ds_profile.DEPTH.max() / resolution) * resolution
     bins = np.arange(min_depth, max_depth + resolution, resolution)
     bin_centers = bins[:-1] + resolution / 2  # Set depth values to bin centers
-
-    # Group variables by depth bins and apply aggregation
+    
     binned_data = {}
+    # Assign bin centers as the new depth values
+    binned_data['DEPTH'] = bin_centers
+    # Group variables by depth bins and apply aggregation
     for name in vars:
+        if bins.size < 2:
+            binned_data[name] = np.full(len(bin_centers), np.nan)
+            continue
         grouped = ds_profile[name].groupby_bins('DEPTH', bins)
         if agg == 'mean':
             binned_data[name] = grouped.mean().values
@@ -107,9 +114,6 @@ def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = '
             binned_data[name] = grouped.median().values
         else:
             raise ValueError(f"Invalid aggregation method: {agg}")
-
-    # Assign bin centers as the new depth values
-    binned_data['DEPTH'] = bin_centers
 
     return binned_data
 
@@ -184,14 +188,14 @@ def calculate_mixed_layer_depth(density: np.array, depth: np.array):
     ### find the first depth below 10m where the density exceeds the density at 10m by the threshold by using the linear interpolation
     if np.nanmax(density_below_10m) < density_10m + threshold:
         return np.nan
-    else:
-        MLD = linear_interpolation(density_below_10m, depth_below_10m, density_10m + threshold)
-        return MLD
+    #else:
+    #    MLD = linear_interpolation(density_below_10m, depth_below_10m, density_10m + threshold)
+    #    return MLD
 
     # Find the mixed layer depth (only analyzing depths below 10m)
-    #for i in range(len(density_below_10m)):
-    #    if density_below_10m[i] > density_10m + threshold:
-    #        return depth_below_10m[i]  # Return first depth that exceeds threshold
+    for i in range(len(density_below_10m)):
+        if density_below_10m[i] > density_10m + threshold:
+            return (depth_below_10m[i] + depth_below_10m[i - 1]) / 2
     #
     #return np.nan  # Return NaN if no depth satisfies the condition
 
@@ -277,8 +281,7 @@ def calculate_MLD_with_CR(density: np.array, depth: np.array, sigma_0: float = 2
     
     return MLD
 
-
-def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, binning: float = 1,agg: str = 'mean'):
+def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool = False, use_bins: bool = False, binning: float = 1, agg: str = 'mean'):
     """
     Computes the mixed layer depth for each profile in the dataset and adds it as a new variable.
     The value is stored equally for each measurement in each profile.
@@ -292,24 +295,79 @@ def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, bi
     -------
     ds: xarray dataset with the additional variable MLD
     """
+    # Create an empty array for MLD values
+    mld_array = np.full(ds.dims['N_MEASUREMENTS'], np.nan)
+
+    # Get unique profile numbers in the dataset
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
+    n_Measurements = 0
+    for profile_number in tqdm.tqdm(profile_numbers, desc="Calculating and adding MLD for Profiles", unit="profile"):
+        # Select measurements for the current profile
+        profile = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
+
+        if profile.N_MEASUREMENTS.size == 0:
+            continue  # Skip if no measurements exist for this profile
+
+        if use_bins:
+            binned_data = bin_data(profile, vars=['SIGMA_T'], resolution=binning, agg=agg)
+            density, depth = binned_data['SIGMA_T'], binned_data['DEPTH']
+        else:
+            depth = profile.DEPTH.values
+            density = profile.SIGMA_T_RAW.values if use_raw else profile.SIGMA_T.values
+
+        # Compute MLD
+        mld = calculate_mixed_layer_depth(density, depth)
+        # Assign MLD to the correct indices
+        for i in range(profile.N_MEASUREMENTS.size):
+            mld_array[n_Measurements] = mld
+            n_Measurements += 1
+
+    # Add the computed MLD as a new variable in the dataset
+    ds['MLD'] = xr.DataArray(mld_array, dims=('N_MEASUREMENTS'),
+                             attrs={'units': 'm', 'long_name': 'Mixed layer depth',
+                                    'data_used': 'Raw' if use_raw else 'Corrected',
+                                    'binning': 'No binning' if not use_bins else f'{str(binning)}m bins',
+                                    'aggregation': agg if use_bins else 'No binning'})
+
+    return ds
+
+
+"""
+def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool = False, use_bins: bool = False, binning: float = 1,agg: str = 'mean'):
+    
+    Computes the mixed layer depth for each profile in the dataset and adds it as a new variable.
+    The value is stored equally for each measurement in each profile.
+    If no mixed layer depth is found for a profile, the value is NaN.
+
+    Parameters
+    ----------
+    ds: xarray dataset containing the potential density data
+
+    Returns
+    -------
+    ds: xarray dataset with the additional variable MLD
+    
+
     mld_array = np.full(len(ds.N_MEASUREMENTS), np.nan)
     # Get unique profile numbers in the dataset
     profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
 
     # Initialize tqdm progress bar
     for profile_number in tqdm.tqdm(profile_numbers, desc="Calculating and adding MLD for Profiles", unit="profile"):
-        profile = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
+        profile = ds.sel(N_MEASUREMENTS = ds.PROFILE_NUMBER == profile_number)
 
         if profile.N_MEASUREMENTS.size == 0:
             continue  # Skip if no measurements exist for this profile
         if use_bins:
-            depth, temperature, salinity, density = bin_data(profile, binning, use_raw, agg)
+            binned_data = bin_data(profile,vars=['SIGMA_T'],resolution=binning,agg=agg)
+            density,depth = binned_data['SIGMA_T'],binned_data['DEPTH']
         else:
+            depth = profile.DEPTH.values
             if use_raw:
                 density = profile.SIGMA_T_RAW.values
+
             else:
                 density = profile.SIGMA_T.values
-            depth = profile.DEPTH.values
         mld = calculate_mixed_layer_depth(density, depth)
 
         # Store MLD for the respective indices
@@ -322,6 +380,7 @@ def add_MLD_to_dataset(ds: xr.Dataset, use_raw: bool, use_bins: bool = False, bi
                                     'binning': 'No binning' if not use_bins else f'{str(binning)}m bins',
                                     'aggregation´': agg if use_bins else 'No binning'})
     return ds
+"""
 
 def min_max_depth_per_profile(ds: xr.Dataset):
     """
@@ -356,8 +415,12 @@ def cut_region(ds: xr.Dataset,region: rm.Regions):
     -------
     ds_region: xarray dataset containing the data only in the specified region
     """
-    region_mask = region.mask(ds.LONGITUDE, ds.LATITUDE)
-    ds_region = ds.isel(N_MEASUREMENTS=region_mask == 0)
+    if "langitude" in ds.coords:
+        region_mask = region.mask(ds.longitude,ds.latitude)
+
+    else:
+        region_mask = region.mask(ds.LONGITUDE, ds.LATITUDE)
+        ds_region = ds.isel(N_MEASUREMENTS=region_mask == 0)
 
     return ds_region
 
@@ -382,12 +445,17 @@ def match_era5_to_glider(ds_glider, ds_ERA5, lon_range=None, lat_range=None):
     xarray.Dataset
         The matched ERA5 data with the same PROFILE_NUMBER dimension as the glider dataset.
     """
-    # Compute mean time, longitude, and latitude per profile
-    mean_time = ds_glider.TIME.groupby(ds_glider.PROFILE_NUMBER).mean()
-    mean_lon = ds_glider.LONGITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
-    mean_lat = ds_glider.LATITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
-
-    profiles = np.unique(ds_glider.PROFILE_NUMBER)
+    if 'PROFILE_NUMBER' in ds_glider.dims:
+        mean_lat = ds_glider.LATITUDE.values
+        mean_lon = ds_glider.LONGITUDE.values
+        mean_time = ds_glider.TIME.values
+        profiles = ds_glider.PROFILE_NUMBER.values
+    else:
+        # Compute mean time, longitude, and latitude per profile
+        mean_time = ds_glider.TIME.groupby(ds_glider.PROFILE_NUMBER).mean()
+        mean_lon = ds_glider.LONGITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
+        mean_lat = ds_glider.LATITUDE.groupby(ds_glider.PROFILE_NUMBER).mean()
+        profiles = np.unique(ds_glider.PROFILE_NUMBER)
 
     if lon_range or lat_range:
         ds_matched_all = []
@@ -428,3 +496,43 @@ def match_era5_to_glider(ds_glider, ds_ERA5, lon_range=None, lat_range=None):
         ds_matched[var].attrs = ds_ERA5[var].attrs
 
     return ds_matched
+
+def hann_window_filter(ds, vars: list, window_size):
+    """
+    Applies a Hann window filter (smoothing) to a variable in an xarray Dataset 
+    and returns the dataset with the filtered variable.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The input dataset containing the variable.
+    vars : list
+        A list of variable names to filter.
+    window_size : int
+        The size of the Hann window (must be an odd number).
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with the filtered variable added.
+    """
+    if window_size % 2 == 0:
+        raise ValueError("Window size must be an odd number.")
+
+    # Generate the Hann window
+    window = hann(window_size, sym=True)
+    window /= window.sum()  # Normalize the window
+
+    ds_filtered = ds.copy()
+    # Apply convolution along the first axis for each variable
+    for var in vars:
+        # Apply the convolution along the 'valid_time' axis
+        filtered_data = convolve(ds[var], window, mode="same", method="auto")
+
+        # Store the filtered result as a new variable
+        ds_filtered[f"{var}_hann_filtered"] = xr.DataArray(
+            filtered_data, dims=ds[var].dims, coords=ds[var].coords, name=f"{var}_hann_filtered"
+        )
+
+    return ds_filtered
+
