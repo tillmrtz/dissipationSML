@@ -78,10 +78,19 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
             fig = plt.gcf()
 
         ## if dim is PROFILE_NUMBER, just take latitude, longitude and time values directly
-        if 'PROFILE_NUMBER' in ds.dims:
-            latitudes = ds.LATITUDE.values
-            longitudes = ds.LONGITUDE.values
-            times = ds.TIME.values
+        if 'DS_NUMBER' in ds.coords:
+            latitudes, longitudes, times = zip(*[
+                (
+                    mission.LATITUDE.groupby(mission.PROFILE_NUMBER).mean(),
+                    mission.LONGITUDE.groupby(mission.PROFILE_NUMBER).mean(),
+                    mission.TIME.groupby(mission.PROFILE_NUMBER).mean()
+                )
+                for mission in (ds.sel(N_MEASUREMENTS=ds.DS_NUMBER == i, drop=True) for i in np.unique(ds.DS_NUMBER))
+            ])
+
+            latitudes = np.concatenate([lat.values for lat in latitudes])
+            longitudes = np.concatenate([lon.values for lon in longitudes])
+            times = np.concatenate([t.values for t in times])
         else:
             # Extract profile mean values
             latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
@@ -663,9 +672,9 @@ def plot_dive_depth(ds, dive_number):
         ### only plot the time at the x-ticks and the date at the x-labels
         ax.grid(True)
     return fig, ax
-
+"""
 def plot_histograms(ds, vars: list, bins: int):
-    """
+
     This function plots histograms for the specified variables in a dataset.
     It also computes the sample mean, standard deviation (sigma), and variance (sigma^2),
     and adds them as vertical lines.
@@ -685,7 +694,7 @@ def plot_histograms(ds, vars: list, bins: int):
         The figure object containing the plot.
     axes: list
         List of axis objects containing the plots.
-    """
+    
     num_vars = len(vars)
     cols = 2  # Number of columns per row
     rows = int(np.ceil(num_vars / cols))  # Determine number of rows needed
@@ -725,6 +734,86 @@ def plot_histograms(ds, vars: list, bins: int):
 
     plt.tight_layout()
     return fig, axes
+"""
+
+def plot_histograms(ds, vars: list, bins: int):
+    """
+    Plots histograms for the specified variables in a dataset.
+    If "TIME" is included, it plots the difference between consecutive timestamps.
+
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset with the variables to plot.
+    vars: list
+        List of variable names to plot.
+    bins: int
+        The number of bins for the histograms.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    axes: list
+        List of axis objects containing the plots.
+    """
+    num_vars = len(vars)
+    cols = 2  # Number of columns per row
+    rows = int(np.ceil(num_vars / cols))  # Number of rows needed
+
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 6 * rows))  # Dynamic figure size
+
+    # Ensure axes is always iterable
+    if num_vars == 1:
+        axes = np.array([axes])  # Convert single axis to an array
+
+    axes = axes.flatten()  # Flatten to ensure indexing works
+
+    for i, var in enumerate(vars):
+        ax = axes[i]
+
+        # Handle "TIME" separately by computing differences
+        if var == "TIME":
+            time_values = ds[var].values.flatten()
+            time_diffs = np.diff(time_values).astype('timedelta64[s]').astype(float)/3600  # Convert to seconds
+            data = time_diffs
+            xlabel = "Time Difference (hours)"
+            var_desc = "Time Intervals"
+            print('Max time difference:', np.max(time_diffs))
+        else:
+            data = ds[var].values.flatten()  # Convert to NumPy array for calculations
+            xlabel = f"{var} ({ds[var].attrs.get('units', '')})"
+            var_desc = ds[var].attrs.get("long_name", var)
+
+        # Compute statistics
+        mean_value = np.nanmean(data)  # Sample mean, ignoring NaNs
+        std_dev = np.nanstd(data)  # Standard deviation (σ)
+        variance = std_dev ** 2  # Variance (σ²)
+
+        # Ensure `data` is not empty before plotting
+        if len(data) > 0:
+            ax.hist(data, bins=bins, alpha=0.5, label=var, color='steelblue', edgecolor='black')
+
+            # Add vertical lines for mean and ± sigma
+            ax.axvline(mean_value, color='r', linestyle='dashed', linewidth=2, label=f'Mean μ: {mean_value:.2f}')
+            ax.axvline(mean_value + std_dev, color='g', linestyle='dotted', linewidth=2, label=f'Std dev. σ: {std_dev:.2f}')
+            ax.axvline(mean_value - std_dev, color='g', linestyle='dotted', linewidth=2)
+
+            # Set title and labels
+            ax.set_title(f"Histogram of {var_desc}\nμ={mean_value:.2f}, σ={std_dev:.2f}, σ²={variance:.2f}")
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel("Frequency")
+            ax.legend()
+        else:
+            ax.set_title(f"No data available for {var_desc}")
+
+    # Remove empty subplots if variables are not a multiple of cols
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    return fig, axes
+
 
 def plot_filtered_data(ds_filtered, vars, time_range=None):
     """
@@ -785,8 +874,69 @@ def plot_filtered_data(ds_filtered, vars, time_range=None):
 
     return fig, axes
 
+def plot_winds_at_time(ds, time):
+    """
+    Plots wind vectors (u10, v10) at a specific time on a map.
 
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing the wind variables ('u10' and 'v10').
+    time : str or pandas.Timestamp
+        The time point for which wind data should be plotted.
+    
+    Returns
+    -------
+    fig, ax : matplotlib figure and axis
+        The wind quiver plot.
+    """
+    # Select data for the specified time
+    ds_at_time = ds.sel(valid_time=time)
 
+    # Extract wind components
+    u = ds_at_time['u10'].values
+    v = ds_at_time['v10'].values
 
+    # Extract coordinates
+    latitudes = ds['latitude'].values
+    longitudes = ds['longitude'].values
 
+    # Ensure data is 2D (reshape if necessary)
+    if u.ndim == 1:
+        lat_size = len(latitudes)
+        lon_size = len(longitudes)
+        u = u.reshape(lat_size, lon_size)
+        v = v.reshape(lat_size, lon_size)
 
+    # Create a meshgrid for quiver plotting
+    lon_grid, lat_grid = np.meshgrid(longitudes, latitudes)
+
+    fig, ax = plt.subplots(figsize=(12, 6), subplot_kw={'projection': ccrs.PlateCarree()})
+
+    # Define map extent
+    ax.set_extent([longitudes.min()-1, longitudes.max()+1, latitudes.min()-1, latitudes.max()+1], crs=ccrs.PlateCarree())
+
+    # Add map features
+    ax.add_feature(cfeature.LAND, edgecolor='black')
+    ax.add_feature(cfeature.COASTLINE)
+    ax.add_feature(cfeature.BORDERS, linestyle=":")
+
+    # Downsample to avoid overcrowding
+    step = 1  # Adjust for more/fewer arrows
+    ax.quiver(
+        lon_grid[::step, ::step], lat_grid[::step, ::step], 
+        u[::step, ::step], v[::step, ::step], 
+        transform=ccrs.PlateCarree(), scale=1000
+    )
+
+    ax.set_title(f"Wind Vectors at {time}")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+
+    # Gridlines
+    gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
+    gl.top_labels = False
+    gl.right_labels = False
+
+    plt.show()
+    return fig, ax

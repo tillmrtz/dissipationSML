@@ -66,9 +66,9 @@ def add_pot_densities(ds: xr.Dataset, use_raw: bool = True):
 
     return ds
 
-
+"""
 def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = 'mean'):
-    """
+    
     Bin the data in a profile dataset by depth using fixed depth steps.
     
     Parameters
@@ -89,7 +89,7 @@ def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = '
     Notes
     -----
     Original author: Till Moritz
-    """
+
     # Remove empty strings from vars list
     #vars = [var for var in vars if var]
 
@@ -116,6 +116,62 @@ def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = '
             raise ValueError(f"Invalid aggregation method: {agg}")
 
     return binned_data
+"""
+
+def bin_data(ds_profile: xr.Dataset, vars: list, resolution: float, agg: str = 'mean'):
+    """
+    Bin the data in a profile dataset by depth using fixed depth steps, starting from 5m.
+
+    Parameters
+    ----------
+    ds_profile : xr.Dataset
+        The dataset containing at least **DEPTH and the variables to bin**.
+    vars : list
+        The variables to bin.
+    resolution : float
+        The depth resolution for binning.
+    agg : str, optional
+        The aggregation method ('mean' or 'median'). Default is 'mean'.
+
+    Returns
+    -------
+    dict
+        A dictionary containing binned data arrays for each variable, including DEPTH.
+
+    Notes
+    -----
+    - Only depths greater than 5m are considered.
+    - Bins start at 5m and follow the given resolution (e.g., 5-15m, 15-25m, ...).
+    """
+
+    # Consider only depths greater than 5m
+    ds_filtered = ds_profile.where(ds_profile.DEPTH > 5, drop=True)
+
+    if ds_filtered.DEPTH.size == 0:
+        # If no valid depths remain, return NaNs
+        return {var: np.full(1, np.nan) for var in vars + ['DEPTH']}
+
+    # Define bin edges starting at 5m
+    min_depth = 5
+    max_depth = np.ceil(ds_filtered.DEPTH.max() / resolution) * resolution
+    bins = np.arange(min_depth, max_depth + resolution, resolution)
+    bin_centers = bins[:-1] + resolution / 2  # Center of each bin
+
+    # Dictionary to store binned results
+    binned_data = {'DEPTH': bin_centers}
+
+    # Group variables by depth bins and apply aggregation
+    for name in vars:
+        grouped = ds_filtered[name].groupby_bins('DEPTH', bins)
+        if agg == 'mean':
+            binned_data[name] = grouped.mean().values
+        elif agg == 'median':
+            binned_data[name] = grouped.median().values
+        else:
+            raise ValueError(f"Invalid aggregation method: {agg}")
+
+    return binned_data
+
 
 def linear_interpolation(x, y, x_new):
     """
