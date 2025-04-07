@@ -123,7 +123,7 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
             levels=contour_levels, colors='black', linewidths=0.5, transform=ccrs.PlateCarree())
 
         # Plot glider track (colored by time)
-        sc = ax.scatter(longitudes, latitudes, c=times, cmap='viridis', s=10, **kw)
+        sc = ax.scatter(longitudes, latitudes, c=times, cmap='inferno', s=10, **kw)
 
         # Colorbar for time (formatted date labels)
         cbar = plt.colorbar(sc, ax=ax)
