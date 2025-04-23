@@ -149,9 +149,179 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
 
     return fig, ax
 
-
-def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
+def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','DENSITY'], use_bins: bool = False, binning: float = 2) -> tuple:
     """
+    Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
+
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least PROFILE_NUMBER, DEPTH, TEMPERATURE, SALINITY, and DENSITY.
+    profile_num: int
+        The profile number to plot.
+    vars: list
+        The variables to plot. Default is ['TEMP','PSAL','DENSITY'].
+    binning: int
+        The depth resolution for binning.
+    use_bins: bool
+        If True, use binned data instead of raw data.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax1: matplotlib.axes.Axes
+        The axis object containing the primary plot.
+
+    Notes
+    -----
+    Original Author: Till Moritz
+    """
+    # Remove empty strings from vars
+    vars = [v for v in vars if v] 
+    # If vars is empty, show an empty plot
+    if not vars:
+        fig, ax1 = plt.subplots(figsize=(12, 9))
+        ax1.set_title(f'Profile {profile_num} (No Variables Selected)')
+        ax1.set_ylabel('Depth (m)')
+        ax1.invert_yaxis()
+        ax1.grid(True)
+        return fig, ax1
+    
+    if len(vars) > 3:
+        raise ValueError("Only three variables can be plotted at once, chose less variables")
+    
+    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
+        fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
+
+        # Select the specific profile
+        profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
+        if use_bins:
+            var_data = tools.bin_data(profile, vars, binning)
+        else:
+            var_data = {name: profile[name].values for name in vars}
+            var_data['DEPTH'] = profile.DEPTH.values
+
+        # Plot binned data
+        mission = ds.id.split('_')[1][0:8]
+        glider = ds.id.split('_')[0]
+
+        s=10+binning
+
+        axs = [ax1, ax1.twiny(), ax1.twiny()]
+        colors = ['red', 'blue', 'grey']
+        for i, var in enumerate(vars):
+            ax = axs[i]
+            ### add the long_name to the label, if it exists
+            long_name = getattr(profile[var], 'long_name', '')
+            ax.plot(var_data[var], var_data['DEPTH'], color=colors[i], label=f'{var} - {long_name}', ls='-')
+            ax.scatter(var_data[var], var_data['DEPTH'], color=colors[i], marker='o',s=s)
+            unit = getattr(profile[var], 'units', '')
+            ax.set_xlabel(f'{var} [{unit}]', color=colors[i])
+            ax.tick_params(axis='x', colors=colors[i], bottom=True, top=False, labelbottom=True, labeltop=False)
+            if i > 0:
+                ax.xaxis.set_ticks_position('bottom')
+                ax.spines['top'].set_visible(False)
+                ax.spines['bottom'].set_position(('axes', -0.09*i))
+            ax.xaxis.set_label_coords(0.5, -0.05-0.105*i)
+
+        fig.legend(loc='upper right',fontsize=10)
+        # Set pressure as y-axis (Increasing Downward)
+        ax1.grid(True)
+        ax1.set_ylabel('Depth (m)')
+        ax1.invert_yaxis()  # Pressure increases downward
+        ax1.set_title(f'Profile {profile_num} ({glider} on mission: {mission})')
+
+    return fig, ax1
+
+def plot_variable_timeseries(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None):
+    """
+    Creates scatter subplots for each variable in vars, with TIME on the x-axis,
+    DEPTH on the y-axis, and the variable value as the color.
+    
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least TIME, DEPTH, and the variables in vars.
+    vars: list
+        List of variable names to plot against TIME.
+    time_var: str
+        Name of the time variable in the dataset. Default is 'TIME'.
+    depth_var: str
+        Name of the depth variable in the dataset. Default is 'DEPTH'.
+    start_date: str or datetime
+        Start date for the x-axis. Default is None.
+    end_date: str or datetime
+        End date for the x-axis. Default is None.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax: list of matplotlib.axes.Axes
+        The axis objects containing the subplots.
+    """
+    num_vars = len(vars)
+    fig, ax = plt.subplots(num_vars, 1, figsize=(20, 5 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
+    
+    if num_vars == 1:
+        ax = [ax]  # Ensure ax is iterable for a single subplot
+    
+    # Convert time to numerical format for plotting
+    time = mdates.date2num(ds[time_var].values)
+    
+    for i, var in enumerate(vars):
+        if var not in ds:
+            raise ValueError(f'Variable "{var}" not found in dataset')
+        
+        values = ds[var].values
+        depth = ds[depth_var].values
+        
+        # Mask NaNs
+        mask = np.isnan(values) | np.isnan(depth)
+
+        if var == 'PSAL':
+            cmap = cmo.cm.haline
+        elif var == 'TEMP':
+            cmap = cmo.cm.thermal
+        elif var in ['SIGMA_T', 'SIGMA_T', 'SIGMA_1']:
+            cmap = cmo.cm.dense
+            ## add mld to the plot
+            mld = ds['MLD'].values
+            ax[i].plot(time, mld, color='black', linestyle='--', label='MLD')
+        else:
+            cmap = cmo.cm.amp
+        
+        scatter = ax[i].scatter(
+            time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
+            vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
+        )
+        
+        ax[i].invert_yaxis()
+        ax[i].set_ylabel('Depth (m)')
+        ax[i].grid()
+        ax[i].set_title(var)
+        if start_date and end_date:
+            start_time = mdates.date2num(np.array(start_date))
+            end_time = mdates.date2num(np.array(end_date))
+            ### plot vertical lines for start and end date
+            ax[i].axvline(x=start_time, color='black', linestyle='--', label='start date')
+            ax[i].axvline(x=end_time, color='black', linestyle='--', label='end date')
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter, ax=ax[i], pad=0.03)
+        cbar.set_label(var, labelpad=20, rotation=270)
+    
+    # Format x-axis
+    ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=3))
+    ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=45)
+    
+    plt.show()
+
+"""
+def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
+    
     Plots temperature, salinity, and density against pressure on a single plot with three x-axes.
 
     Parameters
@@ -173,7 +343,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
         The figure object containing the plot.
     ax: matplotlib.axes.Axes
         The axis object containing the primary plot.
-    """
+    
     with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
         fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
 
@@ -249,7 +419,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
     return fig, ax1, ax2, ax3
 
 def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw: bool,agg: str = 'mean') -> tuple:
-    """
+    
     Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
 
     Parameters
@@ -271,7 +441,7 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
         The figure object containing the plot.
     ax1: matplotlib.axes.Axes
         The axis object containing the primary plot.
-    """
+    
     with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
         fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
 
@@ -353,6 +523,7 @@ def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw
         ax1.set_title(f'Profile {profile_num} ({glider}, mission: {mission})')
 
     return fig, ax1, ax2, ax3
+"""
 
 def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
     """

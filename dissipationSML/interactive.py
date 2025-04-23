@@ -6,7 +6,7 @@ import regionmask as rm
 from matplotlib import pyplot as plt
 from cartopy import crs as ccrs
 from cartopy import feature as cfeature
-from dissipationSML.plotting import plot_IFR_region_on_map, plot_profile_binned, plot_profile, plot_vertical_resolution, plot_dive_depth
+from dissipationSML.plotting import plot_IFR_region_on_map, plot_profile, plot_vertical_resolution, plot_dive_depth
 
 
 def load_glider_config(yaml_path):
@@ -76,9 +76,82 @@ def interactive_glider_selection(yaml_path):
     
     return path_output
 
-
-def interactive_profile(ds, profile_slider, raw_button):
+def interactive_profile(ds,profile_slider):
     """
+    Creates an interactive profile viewer with external slider inputs.
+
+    Parameters
+    ----------
+        ds : xarray.Dataset
+            The dataset containing profile information.
+
+    The function provides the following interactive widgets:
+        - Profile Number: Selects the profile number from available profiles.
+        - Variable 1, Variable 2, Variable 3: Dropdowns to choose up to three variables to plot.
+        - Use Binned Data: Checkbox to toggle between raw and binned data.
+        - Binning Resolution: Slider to adjust the binning resolution if binned data is used.
+
+    Notes
+    -----
+    Original author: Till Moritz
+    """
+
+    def int_plot_profile(profile_num, var1, var2, var3, use_bins, binning):
+        vars = [var1, var2, var3]
+        fig, ax = plot_profile(ds, profile_num, vars, use_bins, binning)
+        display(fig)
+        plt.close(fig)
+        del fig, ax
+
+    # Variable selection dropdowns (with an empty option)
+    # take only into account the variables with float or int data type
+    var_options = [''] + [var for var in ds.data_vars if ds[var].dtype.kind in {'i', 'f'}]
+
+    var1_dropdown = widgets.Dropdown(options=var_options, value=var_options[0], description="Var 1:")
+    var2_dropdown = widgets.Dropdown(options=var_options, value=var_options[0], description="Var 2:")
+    var3_dropdown = widgets.Dropdown(options=var_options, value=var_options[0], description="Var 3:")
+
+    # Checkbox for using binned data
+    use_bins_button = widgets.Checkbox(value=False, description='Bin Data')
+
+    # Binning resolution slider
+    binning_slider = widgets.FloatSlider(value=2, min=1, max=20, step=1,description='Res (m):',continuous_update=False)
+
+
+    # Use a VBox to show/hide the binning slider based on the checkbox state
+    binning_box = widgets.VBox([binning_slider])
+    def toggle_binning_visibility(change):
+        binning_box.layout.display = 'flex' if change['new'] else 'none'
+
+    # Attach observer to toggle visibility
+    use_bins_button.observe(toggle_binning_visibility, names='value')
+
+    # Set initial visibility
+    binning_box.layout.display = 'none' if not use_bins_button.value else 'flex'
+
+    # Arrange variable dropdowns in a horizontal row
+    var_selection_box = widgets.HBox([var1_dropdown, var2_dropdown, var3_dropdown])
+
+    # Arrange all widgets in a vertical layout
+    ui = widgets.VBox([widgets.Label("Select the profile number to visualize:"),profile_slider,
+                       widgets.Label("Choose up to three variables to plot:"),var_selection_box,
+                       widgets.Label("Additional settings:"),use_bins_button,binning_box])
+
+    # Create interactive plot
+    out = widgets.interactive_output(int_plot_profile, {
+        'profile_num': profile_slider,
+        'var1': var1_dropdown,
+        'var2': var2_dropdown,
+        'var3': var3_dropdown,
+        'use_bins': use_bins_button,
+        'binning': binning_slider
+    })
+
+    display(ui, out)
+
+"""
+def interactive_profile(ds, profile_slider, raw_button):
+    
     Creates an interactive profile viewer with external slider inputs.
 
     Parameters:
@@ -88,9 +161,9 @@ def interactive_profile(ds, profile_slider, raw_button):
             Slider to select the profile number.
         raw_button : widgets.Checkbox
             Checkbox to toggle raw data.
-    """
+    
     def interactive_unbinned(profile_number, use_raw):
-        """Plots the selected profile."""
+        Plots the selected profile.
         fig, ax1, ax2, ax3 = plot_profile(ds, profile_number, use_raw)
         display(fig)
         del fig, ax1, ax2, ax3
@@ -100,7 +173,7 @@ def interactive_profile(ds, profile_slider, raw_button):
     display(ui)
 
 def interactive_profile_binned(ds, profile_slider, binning_slider, raw_button, agg_button):
-    """
+    
     Creates an interactive profile viewer with external slider inputs for the binned profile.
 
     Parameters:
@@ -114,9 +187,9 @@ def interactive_profile_binned(ds, profile_slider, binning_slider, raw_button, a
             Checkbox to toggle raw data.
         agg_button : widgets.ToggleButtons
             Toggle button to select aggregation method.
-    """
+    
     def interactive_binned(profile_number, binning, use_raw, agg):
-        """Plots the selected profile."""
+        Plots the selected profile.
         fig, ax1, ax2, ax3 = plot_profile_binned(ds, profile_number, binning, use_raw, agg)
         display(fig)
         del fig, ax1, ax2, ax3
@@ -124,7 +197,8 @@ def interactive_profile_binned(ds, profile_slider, binning_slider, raw_button, a
     # Create interactive widget connection
     ui = widgets.interactive(interactive_binned, profile_number=profile_slider, binning=binning_slider, use_raw=raw_button, agg=agg_button)
     display(ui)
-
+"""
+    
 def interactive_resolution_hist(ds, profile_slider):
     """
     Creates an interactive histogram viewer with external slider inputs for the vertical resolution.
