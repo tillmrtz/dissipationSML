@@ -191,16 +191,12 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
     if len(vars) > 3:
         raise ValueError("Only three variables can be plotted at once, chose less variables")
     
-    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
-        fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
+    with plt.style.context(plotting_style):  
+        fig, ax1 = plt.subplots(figsize=(12, 9)) 
 
-        # Select the specific profile
         profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
         if use_bins:
-            var_data = tools.bin_data(profile, vars, binning)
-        else:
-            var_data = {name: profile[name].values for name in vars}
-            var_data['DEPTH'] = profile.DEPTH.values
+            profile = tools.bin_profile(profile, vars, binning)
 
         # Plot binned data
         mission = ds.id.split('_')[1][0:8]
@@ -214,8 +210,8 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
             ax = axs[i]
             ### add the long_name to the label, if it exists
             long_name = getattr(profile[var], 'long_name', '')
-            ax.plot(var_data[var], var_data['DEPTH'], color=colors[i], label=f'{var} - {long_name}', ls='-')
-            ax.scatter(var_data[var], var_data['DEPTH'], color=colors[i], marker='o',s=s)
+            ax.plot(profile[var], profile['DEPTH'], color=colors[i], label=f'{var} - {long_name}', ls='-')
+            ax.scatter(profile[var], profile['DEPTH'], color=colors[i], marker='o',s=s)
             unit = getattr(profile[var], 'units', '')
             ax.set_xlabel(f'{var} [{unit}]', color=colors[i])
             ax.tick_params(axis='x', colors=colors[i], bottom=True, top=False, labelbottom=True, labeltop=False)
@@ -234,10 +230,82 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
 
     return fig, ax1
 
-def plot_variable_timeseries(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None):
+def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: float = 2):
     """
-    Creates scatter subplots for each variable in vars, with TIME on the x-axis,
-    DEPTH on the y-axis, and the variable value as the color.
+    Plots the convective resistance (CR) of a profile against depth based on calculate_CR_for_all_depth function.
+    For the calculation, the density anomaly with reference to 1000 kg/m3 is used ('SIGMA_1')
+
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least PROFILE_NUMBER, DEPTH, SIGMA_1.
+    profile_num: int
+        The profile number to plot.
+    use_bins: bool
+        If True, use binned data instead of raw data.
+    binning: int
+        The depth resolution for binning.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax: matplotlib.axes.Axes
+        The axis object containing the primary plot.
+
+    Notes
+    -----
+    Original Author: Till Moritz
+    """
+    vars = ['SIGMA_1', 'DEPTH']
+
+    profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
+
+    if use_bins:
+        profile = tools.bin_profile(profile, vars, binning)
+
+    CR_df = tools.calculate_CR_for_all_depth(profile)
+
+    depth = CR_df['DEPTH'].values
+    CR = CR_df['CR'].values
+
+    with plt.style.context(plotting_style):
+        fig, ax = plt.subplots(figsize=(12, 9))
+        ax.plot(CR, depth, label='CR')
+        ax.scatter(CR, depth, marker='o', s=10+binning)
+        ax.set_xlabel('Convective Resistance (CR)')
+        ax.set_ylabel('Depth (m)')
+        ax.invert_yaxis()
+        ax.set_title(f'Profile {profile_num} (Convective Resistance)')
+        ax.grid(True)
+        ax.legend()
+        plt.show()
+    
+    return fig, ax
+
+colormaps = {
+    'PSAL': cmo.haline,
+    'PSAL_RAW': cmo.haline,
+    'TEMP': cmo.thermal,
+    'TEMP_RAW': cmo.thermal,
+    'THETA': cmo.thermal,
+    'SIGMA_T': cmo.dense,
+    'SIGMA_T_RAW': cmo.dense,
+    'SIGMA_1': cmo.dense,
+    'SIGMA_1_RAW': cmo.dense,
+    'SIGTHETA': cmo.dense,
+    'SIGTHETA_RAW': cmo.dense,
+    'PRES': cmo.deep,
+    'GLIDER_VERT_VELO_MODEL': cmo.speed,
+    'GLIDER_HORZ_VELO_MODEL': cmo.speed,
+    'GLIDE_SPEED': cmo.speed,
+}
+
+def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None, add_MLD=None):
+    """
+    Plots a section of the dataset with TIME on the x-axis, DEPTH on the y-axis, with color representing the variable value.
+    Any number of variables can be plotted in subplots. If plot_MLD is set to True, the MLD will be plotted inside the density plot or if no density plot is available, 
+    it will be plotted in the first subplot.
     
     Parameters
     ----------
@@ -249,10 +317,12 @@ def plot_variable_timeseries(ds, vars, time_var='TIME', depth_var='DEPTH', start
         Name of the time variable in the dataset. Default is 'TIME'.
     depth_var: str
         Name of the depth variable in the dataset. Default is 'DEPTH'.
-    start_date: str or datetime
-        Start date for the x-axis. Default is None.
-    end_date: str or datetime
-        End date for the x-axis. Default is None.
+    start_date: str or datetime.datetime or numpy.datetime64
+        Start date for the x-axis. Default is None. If str, it should be in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    end_date: str or datetime.datetime or numpy.datetime64
+        End date for the x-axis. Default is None. If str, it should be in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    add_MLD: pd.DataFrame
+        MLD as a pandas Dataframe, which is the result of the MLD calculation compute_mld(). The dataframe should contain the profile number, MLD and the mean time profile.
 
     Returns
     -------
@@ -261,269 +331,61 @@ def plot_variable_timeseries(ds, vars, time_var='TIME', depth_var='DEPTH', start
     ax: list of matplotlib.axes.Axes
         The axis objects containing the subplots.
     """
+    ### cut the dataset to the time range
+    if start_date is not None or end_date is not None:
+        mask = (ds.TIME >= np.datetime64(start_date)) & (ds.TIME <= np.datetime64(end_date))
+        ds = ds.sel(N_MEASUREMENTS=mask)
+        if add_MLD is not None:
+            add_MLD = add_MLD[(add_MLD['TIME'] >= start_date) & (add_MLD['TIME'] <= end_date)]
+
     num_vars = len(vars)
     fig, ax = plt.subplots(num_vars, 1, figsize=(20, 5 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
-    
     if num_vars == 1:
         ax = [ax]  # Ensure ax is iterable for a single subplot
-    
-    # Convert time to numerical format for plotting
+
     time = mdates.date2num(ds[time_var].values)
-    
+
+    # Check if any variable uses the 'dense' colormap
+    has_density_plot = any(colormaps.get(var) == cmo.dense for var in vars)
+
     for i, var in enumerate(vars):
         if var not in ds:
             raise ValueError(f'Variable "{var}" not found in dataset')
-        
+
         values = ds[var].values
         depth = ds[depth_var].values
-        
-        # Mask NaNs
         mask = np.isnan(values) | np.isnan(depth)
 
-        if var == 'PSAL':
-            cmap = cmo.cm.haline
-        elif var == 'TEMP':
-            cmap = cmo.cm.thermal
-        elif var in ['SIGMA_T', 'SIGMA_T', 'SIGMA_1']:
-            cmap = cmo.cm.dense
-            ## add mld to the plot
-            mld = ds['MLD'].values
-            ax[i].plot(time, mld, color='black', linestyle='--', label='MLD')
-        else:
-            cmap = cmo.cm.amp
-        
+        cmap = colormaps.get(var, cmo.amp)
+
         scatter = ax[i].scatter(
             time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
             vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
         )
-        
+
+        # Plot MLD if provided
+        if add_MLD is not None:
+            if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
+                ax[i].plot(add_MLD['TIME'], add_MLD['MLD'], color='black', marker='o', linewidth=1, label='Mixed Layer Depth', markersize=2)
+                #ax[i].scatter(MLD_times, MLD_values, color='black', s=20, marker='x')
+                ax[i].legend(loc='upper left', fontsize=8)
+
         ax[i].invert_yaxis()
         ax[i].set_ylabel('Depth (m)')
         ax[i].grid()
         ax[i].set_title(var)
-        if start_date and end_date:
-            start_time = mdates.date2num(np.array(start_date))
-            end_time = mdates.date2num(np.array(end_date))
-            ### plot vertical lines for start and end date
-            ax[i].axvline(x=start_time, color='black', linestyle='--', label='start date')
-            ax[i].axvline(x=end_time, color='black', linestyle='--', label='end date')
-        
-        # Add colorbar
+        ax[i].set_xlim(left=time[0]-1, right=time[-1]+1)
+
         cbar = plt.colorbar(scatter, ax=ax[i], pad=0.03)
         cbar.set_label(var, labelpad=20, rotation=270)
-    
-    # Format x-axis
-    ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=3))
+
+    ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
     ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.xticks(rotation=45)
-    
+    plt.tight_layout()
     plt.show()
 
-"""
-def plot_profile(ds: xr.Dataset, profile_num: int, use_raw: bool) -> tuple:
-    
-    Plots temperature, salinity, and density against pressure on a single plot with three x-axes.
-
-    Parameters
-    ----------
-    ds: xarray.Dataset
-        Xarray dataset in OG1 format with at least PRESSURE, TEMPERATURE, SALINITY, and DENSITY.
-    profile_num: int
-        The profile number to plot.
-    use_raw: bool
-        If True, add the raw data to the plot.
-    plot_binned: bool
-        If True, add the binned data to the plot.
-    binning: float
-        The depth resolution for binning.
-
-    Returns
-    -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    ax: matplotlib.axes.Axes
-        The axis object containing the primary plot.
-    
-    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
-        fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
-
-        # Select the specific profile
-        profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
-        pressures = profile.PRES.values
-        depth = profile.DEPTH.values
-        temperatures = profile.TEMP.values
-        salinity = profile.PSAL.values
-        density = profile.SIGMA_T.values
-        #sigma0 = profile.SIGMA_T.mean().values
-
-        mld = tools.calculate_mixed_layer_depth(density, depth)
-        mld_CR = tools.calculate_MLD_with_CR(density, depth)
-
-        mission = ds.id.split('_')[1][0:8]
-        glider = ds.id.split('_')[0]
-
-        # Temperature (Main X-Axis)
-        ax1.plot(temperatures, depth, color='red', label='Temperature (°C)')
-        ax1.set_xlabel('Temperature (°C)', color='red')
-        ax1.tick_params(axis='x', colors='red', bottom=True, top=False, labelbottom=True, labeltop=False)
-
-        # Salinity (Second X-Axis at Bottom)
-        ax2 = ax1.twiny()
-        ax2.plot(salinity, depth, color='blue', label='Salinity (PSU)')
-        ax2.set_xlabel('Salinity (PSU)', color='blue')
-        ax2.tick_params(axis='x', colors='blue', bottom=True, top=False, labelbottom=True, labeltop=False)
-        ax2.xaxis.set_ticks_position('bottom')  # Move ticks to bottom
-        ax2.spines['top'].set_visible(False)  # Hide top spine
-        ax2.spines['bottom'].set_position(('axes', -0.07))  # Salinity (shift downward)
-
-        # Density (Third X-Axis at Bottom, displayed as +1000)
-        ax3 = ax1.twiny()
-        ax3.plot(density, depth, color='grey', label='Density Anomaly (kg/m³)')
-        ax3.set_xlabel('Density Anomaly (kg/m³)', color='grey')
-        ax3.tick_params(axis='x', colors='grey', bottom=True, top=False, labelbottom=True, labeltop=False)
-        ax3.xaxis.set_ticks_position('bottom')  # Move ticks to bottom
-        ax3.spines['top'].set_visible(False)  # Hide top spine
-        ax3.spines['bottom'].set_position(('axes', -0.14))
-
-        if use_raw:
-            salinity_raw = profile.PSAL_RAW.values
-            temperature_raw = profile.TEMP_RAW.values
-            density_raw = profile.SIGMA_T_RAW.values
-            ### cut unrealistic values
-            salinity_raw = np.where((salinity_raw > 35.5) | (salinity_raw < 34.8), np.nan, salinity_raw)
-            density_raw = np.where((density_raw > 28.5) | (density_raw < 26.5), np.nan, density_raw)
-            mld = tools.calculate_mixed_layer_depth(density_raw, depth)
-            mld_CR = tools.calculate_MLD_with_CR(density_raw, depth)
-            # Plot raw data
-            ax1.plot(temperature_raw, depth, color='red', ls=':', label='Temperature Raw (°C)')
-            ax2.plot(salinity_raw, depth, color='blue', ls=':', label='Salinity Raw (PSU)')
-            ax3.plot(density_raw, depth, color='grey', ls=':', label='Density Anomaly Raw (kg/m³)')
-            #ax1.axhline(y=mld_raw, color='black', linestyle=':', label=f'MLD Raw ({round(mld_raw,1)} m)')
-
-        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m) from density threshold')
-        ax1.axhline(y=mld_CR, color='black', linestyle=':', label=f'MLD ({round(mld_CR,1)} m) from CR')
-        ### make a legend for all axes that are not on top of each other
-        #[ax.legend(fontsize = 10) for ax in [ax1, ax2, ax3]]
-        fig.legend(fontsize = 10)
-        # Adjust x-axis label positions to avoid overlap
-        ax1.xaxis.set_label_coords(0.5, -0.04)
-        ax2.xaxis.set_label_coords(0.5, -0.13)
-        ax3.xaxis.set_label_coords(0.5, -0.20)
-
-        # Set pressure as y-axis (Increasing Downward)
-        ax1.set_ylabel('Depth (m)')
-        ax1.invert_yaxis()  # Pressure increases downward
-
-        ax1.set_title(f'Profile {profile_num} ({glider}, mission: {mission})')
-
-    return fig, ax1, ax2, ax3
-
-def plot_profile_binned(ds: xr.Dataset, profile_num: int, binning: float,use_raw: bool,agg: str = 'mean') -> tuple:
-    
-    Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
-
-    Parameters
-    ----------
-    ds: xarray.Dataset
-        Xarray dataset in OG1 format with at least PROFILE_NUMBER, DEPTH, TEMPERATURE, SALINITY, and DENSITY.
-    profile_num: int
-        The profile number to plot.
-    binning: int
-        The depth resolution for binning.
-    use_raw: bool
-        If True, use raw data for binning.
-    agg: str
-        The aggregation method to use for binning. Default is 'mean'. Other option is 'median'.
-
-    Returns
-    -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    ax1: matplotlib.axes.Axes
-        The axis object containing the primary plot.
-    
-    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
-        fig, ax1 = plt.subplots(figsize=(12, 9))  # Adjusted for profile visualization
-
-        # Select the specific profile
-        profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
-        #sigma_0 = profile.SIGMA_T.mean().values
-        if use_raw:
-            vars = ['TEMP_RAW','PSAL_RAW','SIGMA_T_RAW']
-        else:
-            vars = ['TEMP','PSAL','SIGMA_T']
-
-        binned_data = tools.bin_data(ds_profile = profile,vars=vars, resolution=binning, agg=agg)
-
-        depth = binned_data['DEPTH']
-        temperature = binned_data[vars[0]]
-        salinity = binned_data[vars[1]]
-        density = binned_data[vars[2]]
-
-        ## cut off unrealistic values
-        salinity = np.where((salinity > 35.5) | (salinity < 34.8), np.nan, salinity)
-        density = np.where((density > 28.5) | (density < 26.5), np.nan, density)
-
-        mld = tools.calculate_mixed_layer_depth(density, depth)
-        mld_CR = tools.calculate_MLD_with_CR(density, depth)
-
-        msk = np.isnan(depth)
-        depth = depth[~msk]
-        temperature = temperature[~msk]
-        salinity = salinity[~msk]
-        density = density[~msk]
-        # Plot binned data
-        mission = ds.id.split('_')[1][0:8]
-        glider = ds.id.split('_')[0]
-        min_depth = str(round(np.nanmin(profile.DEPTH.values),1))
-
-        s=10+binning
-
-        # Temperature (Main X-Axis)
-        ax1.plot(temperature, depth , color='red', label='Temperature (°C)', ls='-')
-        ax1.scatter(temperature, depth, color='red', marker='o',s=s)  # Scatter for visibility
-        ax1.set_xlabel('Temperature (°C)', color='red')
-        ax1.tick_params(axis='x', colors='red', bottom=True, top=False, labelbottom=True, labeltop=False)
-
-        # Salinity (Second X-Axis at Bottom)
-        ax2 = ax1.twiny()
-        ax2.plot(salinity,depth, color='blue', label='Salinity (PSU)')
-        ax2.scatter(salinity, depth, color='blue', marker='o',s=s)
-        ax2.set_xlabel('Salinity (PSU)', color='blue')
-        ax2.tick_params(axis='x', colors='blue', bottom=True, top=False, labelbottom=True, labeltop=False)
-        ax2.xaxis.set_ticks_position('bottom')  # Move ticks to bottom
-        ax2.spines['top'].set_visible(False)  # Hide top spine
-        ax2.spines['bottom'].set_position(('axes', -0.07))  # Salinity (shift downward)
-
-        # Density (Third X-Axis at Bottom, displayed as +1000)
-        ax3 = ax1.twiny()
-        ax3.plot(density, depth, color='grey', ls = '--', label='Density Anomaly (kg/m³)')
-        ax3.scatter(density, depth, color='grey', marker='o',s=s)
-        ax3.set_xlabel('Density Anomaly (kg/m³)', color='grey')
-        ax3.tick_params(axis='x', colors='grey', bottom=True, top=False, labelbottom=True, labeltop=False)
-        ax3.xaxis.set_ticks_position('bottom')  # Move ticks to bottom
-        ax3.spines['top'].set_visible(False)  # Hide top spine
-        ax3.spines['bottom'].set_position(('axes', -0.14))
-        ### add a line for the mixed layer depth
-        ax1.axhline(y=mld, color='black', linestyle='--', label=f'MLD ({round(mld,1)} m) from density threshold')
-        ax1.axhline(y=mld_CR, color='black', linestyle=':', label=f'MLD ({round(mld_CR,1)} m) from CR')
-
-        ### make a legend for all axes that are not on top of each other
-        #[ax.legend(fontsize = 10) for ax in [ax1, ax2, ax3]]
-        fig.legend(fontsize = 10)
-        # Adjust x-axis label positions to avoid overlap
-        ax1.xaxis.set_label_coords(0.5, -0.04)
-        ax2.xaxis.set_label_coords(0.5, -0.13)
-        ax3.xaxis.set_label_coords(0.5, -0.20)
-
-        # Set pressure as y-axis (Increasing Downward)
-        ax1.set_ylabel('Depth (m)')
-        ax1.invert_yaxis()  # Pressure increases downward
-
-        ax1.set_title(f'Profile {profile_num} ({glider}, mission: {mission})')
-
-    return fig, ax1, ax2, ax3
-"""
+    return fig, ax
 
 def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
     """
@@ -596,78 +458,7 @@ def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple
         [a.grid() for a in ax]
     return fig, ax
 
-def plot_MLD_evolution(ds,binning = None,use_raw = False, plot_density:bool = True) -> tuple:
-    """
-    This function plots the evolution of the mixed layer depth over time.
-
-    Parameters
-    ----------
-    ds: xarray.Dataset
-        Xarray dataset in OG1 format with at least TIME, DEPTH, TEMPERATURE, SALINITY, and DENSITY.
-    binning: int
-        The depth resolution for binning.
-    use_raw: bool
-        If True, use raw data for binning.
-
-    Returns
-    -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    ax: matplotlib.axes.Axes
-        The axis object containing the primary plot.
-    """
-    time = []
-    mld = []
-    for i in np.unique(ds.PROFILE_NUMBER):
-        profile = ds.where(ds.PROFILE_NUMBER == i, drop=True)
-        time.append(profile.TIME.values[0])
-        if use_raw:
-            vars = ['SIGMA_T_RAW']
-        else:
-            vars = ['SIGMA_T']
-
-        if binning:
-            binned_data = tools.bin_data(ds_profile = profile,vars=vars, resolution=binning, agg='mean')
-            depth = binned_data['DEPTH']
-            density = binned_data[vars[0]]
-        else:
-            depth = profile.DEPTH.values
-            density = profile.SIGMA_T.values
-
-        mld.append(tools.calculate_mixed_layer_depth(density, depth))
-        
-    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
-        fig, ax = plt.subplots(figsize=(18, 8), sharex=True)
-        ax.plot(time, mld, color = 'black', label='MLD')                   
-        ax.set_title('Mixed Layer Depth Evolution over Time')
-        if plot_density:
-            ### now plot the density profile
-            density = ds.SIGTHETA_RAW.values
-            depth = ds.DEPTH.values
-            d = ax.scatter(ds.TIME.values,depth, c=density, s=20, cmap=cmo.dense,
-                            vmin=np.nanpercentile(density, 0.5), vmax=np.nanpercentile(density, 99.5))
-            fig.colorbar(d, ax=ax, label='Density [kg/m^3]')
-            ax.set_ylim([np.nanmax(depth),0])
-            ax.set_title(f'Mixed Layer Depth Evolution over Time with density profile (Binning: {binning} m)')
-        else:
-            ax.set_ylim([np.nanmax(mld)+10,0])
-        ax.set_ylabel('Depth [m]')
-        ax.set_xlabel('Time')
-        # Dynamically adjust the interval based on the number of time points
-        num_days = (time[-1] - time[0]).astype('timedelta64[D]').astype(int)
-        interval = max(1, num_days // 25)  # Adjust the divisor to control the number of ticks
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=interval))
-        #ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
-        #ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m-%Y'))
-        ax.tick_params(axis='x', rotation=45)
-        ax.grid(True)
-        ax.legend()
-        plt.tight_layout()
-    
-    return fig, ax
-
-def plot_IFR_region_on_map(IFR_region: rm.Regions) -> tuple({plt.Figure, plt.Axes}):
+def plot_IFR_region_on_map(IFR_region: rm.Regions):
     """
     This function plots the glider track on a map, with latitude and longitude colored by time.
 
