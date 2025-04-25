@@ -173,11 +173,16 @@ def bin_profile(ds_profile, vars, binning, agg: str = 'mean'):
         profile_number = ds_profile.index.values
     if len(np.unique(profile_number)) > 1:
         raise ValueError("Only one profile can be selected for binning.")
-    
+
     binned_data = {}
     msk = ds_profile['DEPTH'].values > 0
     depth = ds_profile['DEPTH'].values[msk]
     profile_number = profile_number[msk]
+
+    # Check for short or empty input data
+    if any(len(ds_profile[var]) <= 1 for var in vars) or len(depth) <= 1:
+        # return DataFrame with expected columns but no data
+        return pd.DataFrame(columns=vars + ['DEPTH', 'PROFILE_NUMBER'])
 
     for var in vars:
         var_grid, prof_num_grid, depth_grid = construct_2dgrid(profile_number, depth, ds_profile[var].values[msk],
@@ -408,14 +413,18 @@ def mld_profile_treshhold(profile, variable: str = 'SIGMA_T', threshold: float =
             density = profile[variable].values
         else:
             raise TypeError("Input must be a pandas.DataFrame or xarray.Dataset")
+        
+    # Convert to float arrays to avoid isfinite errors
+    depth = np.asarray(depth, dtype=np.float64)
+    density = np.asarray(density, dtype=np.float64)
 
-    # Remove NaNs
-    valid = ~np.isnan(depth) & ~np.isnan(density)
-    depth, density = depth[valid], density[valid]
-
-    if depth.size == 0 or density.size == 0:
-        print("No valid data available for MLD calculation.")
+    # Remove NaNs and check if valid data remains
+    valid = np.isfinite(depth) & np.isfinite(density)
+    if not np.any(valid):
+        print("No valid depth or density data for MLD calculation.")
         return np.nan
+
+    depth, density = depth[valid], density[valid]
     
     if np.nanmean(np.diff(depth)) < 0:
         depth = -1 * depth
