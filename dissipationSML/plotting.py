@@ -12,11 +12,11 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import os
 from dissipationSML import tools
+import matplotlib.cm as cm
+
 
 import regionmask as rm
 import ipywidgets as widgets
-import numpy as np
-import matplotlib.pyplot as plt
 from IPython.display import display, clear_output
 
 
@@ -50,7 +50,7 @@ def get_bathymetry_levels(bath, level_spacing=250):
         contour_levels = levels[::2]  # Every second level
         return levels, contour_levels, max_level
 
-def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple({plt.Figure, plt.Axes}):
+def plot_glider_track(ds: xr.Dataset, mean_profile = False, ax: plt.Axes = None, **kw: dict):
     """
     This function plots the glider track on a map, with latitude and longitude colored by time. Contour lines are added to the plot.
 
@@ -70,43 +70,45 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         The axis object containing the primary plot.
     
     """
-    with plt.style.context(plotting_style):
-        # Create figure and axis
+    ## if dim is PROFILE_NUMBER, just take latitude, longitude and time values directly
+    if mean_profile:
+        # Extract profile mean values
+        latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+        longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+        times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
+    else:
+        #Extract profile values directly
+        latitudes = ds.LATITUDE.values
+        longitudes = ds.LONGITUDE.values
+        times = ds.TIME.values
+
+        # Define bounding box
+        lon_min, lon_max = -15, -6
+        lat_min, lat_max = 60, 65
+
+        # Calculate aspect-corrected figsize
+        mean_lat_rad = np.deg2rad((lat_min + lat_max) / 2)
+        delta_lat = lat_max - lat_min
+        delta_lon = lon_max - lon_min
+        width = delta_lon * np.cos(mean_lat_rad)
+        height = delta_lat
+
+        # Choose a scaling factor
+        scale = 4  # This just determines overall size
+
+        figsize = (width * scale, height * scale)
+
+        # Create figure and axis if needed
         if ax is None:
-            fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()})
+            fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()}, figsize=figsize)
         else:
             fig = plt.gcf()
 
-        ## if dim is PROFILE_NUMBER, just take latitude, longitude and time values directly
-        if 'DS_NUMBER' in ds.coords:
-            latitudes, longitudes, times = zip(*[
-                (
-                    mission.LATITUDE.groupby(mission.PROFILE_NUMBER).mean(),
-                    mission.LONGITUDE.groupby(mission.PROFILE_NUMBER).mean(),
-                    mission.TIME.groupby(mission.PROFILE_NUMBER).mean()
-                )
-                for mission in (ds.sel(N_MEASUREMENTS=ds.DS_NUMBER == i, drop=True) for i in np.unique(ds.DS_NUMBER))
-            ])
+        # Set map extent
+        ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
 
-            latitudes = np.concatenate([lat.values for lat in latitudes])
-            longitudes = np.concatenate([lon.values for lon in longitudes])
-            times = np.concatenate([t.values for t in times])
-        else:
-            # Extract profile mean values
-            latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-            longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-            times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
-
-        # Define map extent
-        lon_lat_range = [
-            np.min(longitudes) - 1, np.max(longitudes) + 1, 
-            np.min(latitudes) - 1, np.max(latitudes) + 1
-        ]
-        ax.set_extent(lon_lat_range, crs=ccrs.PlateCarree())
-
-        # Extract bathymetry data
-        bath = bathymetry.sel(lon=slice(lon_lat_range[0], lon_lat_range[1]), 
-                              lat=slice(lon_lat_range[2], lon_lat_range[3]))
+        # Load bathymetry (you'll need to define `bathymetry` before calling this function)
+        bath = bathymetry.sel(lon=slice(lon_min, lon_max), lat=slice(lat_min, lat_max))
 
         # Compute bathymetry levels
         levels, contour_levels, max_level = get_bathymetry_levels(bath)
@@ -126,11 +128,11 @@ def plot_glider_track(ds: xr.Dataset, ax: plt.Axes = None, **kw: dict) -> tuple(
         sc = ax.scatter(longitudes, latitudes, c=times, cmap='inferno', s=10, **kw)
 
         # Colorbar for time (formatted date labels)
-        cbar = plt.colorbar(sc, ax=ax)
+        cbar = plt.colorbar(sc, ax=ax,pad = 0.01, shrink = 0.3)
         cbar.ax.set_yticklabels([pd.to_datetime(t).strftime('%Y-%b-%d') for t in cbar.get_ticks()])
 
         # Colorbar for bathymetry
-        cbar_bath = plt.colorbar(pcm, ax=ax, label='Depth (m)', pad=0.02, shrink=0.8)
+        cbar_bath = plt.colorbar(pcm, ax=ax, label='Depth (m)', pad=0.01, shrink=0.3)
         cbar_bath.set_ticks(levels)
 
         # Add map features
@@ -299,6 +301,7 @@ colormaps = {
     'GLIDER_VERT_VELO_MODEL': cmo.speed,
     'GLIDER_HORZ_VELO_MODEL': cmo.speed,
     'GLIDE_SPEED': cmo.speed,
+    'VERTICAL_WATER_VELOCITY': cmo.delta,
 }
 
 def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None, add_MLD=None):
@@ -356,12 +359,19 @@ def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, 
         depth = ds[depth_var].values
         mask = np.isnan(values) | np.isnan(depth)
 
-        cmap = colormaps.get(var, cmo.amp)
-
-        scatter = ax[i].scatter(
-            time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
-            vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
-        )
+        cmap = colormaps.get(var, cmo.delta)
+        ### check if positive and negative values are present, then center the colormap around 0
+        if cmap == cmo.delta and np.any(values < 0) and np.any(values > 0):
+            norm = mcolors.TwoSlopeNorm(vmin=np.nanpercentile(values, 0.5), vcenter=0, vmax=np.nanpercentile(values, 99.5))
+            scatter = ax[i].scatter(
+                time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
+                norm=norm
+            )
+        else:
+            scatter = ax[i].scatter(
+                time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
+                vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
+            )
 
         # Plot MLD if provided
         if add_MLD is not None:
@@ -902,3 +912,98 @@ def plot_winds_at_time(ds, time):
 
     plt.show()
     return fig, ax
+
+def plot_var_from_mld(mld_ds, var, years, rolling_str='12h'):
+    """
+    Plot one variable from the MLD dataset(s), colored by glider mission, for all specified years.
+
+    Parameters
+    ----------
+    mld_ds : xarray.Dataset or list of xarray.Dataset
+        MLD dataset(s) containing the variable to plot. If a list, each entry is treated as a unique mission.
+    var : str
+        The variable name to plot.
+    years : list of int
+        The years to plot.
+    rolling_str : str
+        The rolling mean window string (e.g., '12h' for 12 hours).
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure object containing the plots.
+    """
+    if not isinstance(mld_ds, list):
+        mld_ds = [mld_ds]
+
+    # Collect all unique missions
+    all_missions = []
+    for ds in mld_ds:
+        all_missions.extend(np.unique(ds['GLIDER_MISSION'].values))
+    sorted_unique_missions = sorted(set(all_missions), key=lambda x: x.split('/')[1])
+    mission_to_int = {mission: i for i, mission in enumerate(sorted_unique_missions)}
+
+    # Set up colormap
+    cmap = cm.get_cmap('tab20', len(sorted_unique_missions))
+    norm = mcolors.Normalize(vmin=0, vmax=len(sorted_unique_missions) - 1)
+
+    fig, axes = plt.subplots(len(years), 1, figsize=(25, 6 * len(years) + 4), sharex=False, sharey=True)
+    if len(years) == 1:
+        axes = [axes]
+
+    for i, year in enumerate(years):
+        ax = axes[i]
+
+        for ds in mld_ds:
+            ds = ds.sortby('TIME')  # Ensure time is sorted
+
+            # Mission ID (assumes one unique mission per ds)
+            mission_id = ds['GLIDER_MISSION'].values[0]
+            mission_color = cmap(mission_to_int[mission_id])
+
+            # Select year
+            ds_year = ds.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+
+            if ds_year.TIME.size == 0 or var not in ds_year:
+                continue
+
+            # Rolling mean
+            rolling = ds.resample(TIME=rolling_str).mean(dim='TIME').sortby('TIME')
+            rolling_year = rolling.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+
+            # Scatter
+            ax.scatter(
+                ds_year['TIME'].values,
+                ds_year[var].values,
+                c=[mission_color],
+                s=10,
+                label=None
+            )
+
+            # Rolling line (same color)
+            ax.plot(
+                rolling_year['TIME'].values,
+                rolling_year[var].values,
+                color=mission_color,
+                linewidth=2
+            )
+
+        ax.set_xlim(np.datetime64(f'{year}-01-01'), np.datetime64(f'{year}-12-31'))
+        if var == 'MLD':
+            ax.set_ylim(0, 700)
+            ax.invert_yaxis()
+        ax.set_ylabel(f'{var} (m)')
+        ax.set_title(f'{var} colored by Mission - {year}', fontsize=16)
+        ax.grid(True)
+
+    axes[-1].set_xlabel('Time', fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 1])
+
+    # Shared colorbar
+    cbar = fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes, orientation='horizontal', fraction=0.15, pad=0.1 / len(years))
+    cbar.set_ticks(np.arange(len(sorted_unique_missions)))
+    cbar.set_ticklabels(sorted_unique_missions)
+    cbar.set_label('Mission (Glider/MissionDate)', fontsize=14)
+
+    return fig
+
