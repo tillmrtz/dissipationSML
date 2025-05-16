@@ -390,100 +390,122 @@ def construct_2dgrid(x, y, v, xi=1, yi=1, x_bin_center: bool = True, y_bin_cente
     return grid, XI, YI
 
 
-def bin_profile(ds_profile, vars, binning, agg: str = 'mean'):
+def bin_profile(ds_profile, vars, binning, dim='DEPTH', agg='mean'):
     """
-    Bins the data for a single profile using the construct_2dgrid function. The binning determines the depth resolution.
+    Bin a single profile dataset along a specified dimension ('DEPTH' or 'TIME').
 
     Parameters
     ----------
     ds_profile : xr.Dataset or pd.DataFrame
-        The dataset or dataframe containing the data of one profile containing at least 'DEPTH', 'PROFILE_NUMBER' and the variables to bin.
-    vars : list
-        The variables to bin.
-    binning : float
-        The depth resolution for binning.
-    agg : str, optional
-        The aggregation method ('mean' or 'median'). Default is 'mean'.
-
-    Returns
-    -------
-    binned_profile: pd.DataFrame
-        A dataframe containing the binned data for the selected profile.
-
-    Notes
-    -----
-    Original author: Till Moritz
-    """
-    ## check if only one profile is selected
-    if isinstance(ds_profile, xr.Dataset):
-        profile_number = ds_profile['PROFILE_NUMBER'].values
-    elif isinstance(ds_profile, pd.DataFrame):
-        profile_number = ds_profile.index.values
-    if len(np.unique(profile_number)) > 1:
-        raise ValueError("Only one profile can be selected for binning.")
-
-    binned_data = {}
-    msk = ds_profile['DEPTH'].values > 0
-    depth = ds_profile['DEPTH'].values[msk]
-    profile_number = profile_number[msk]
-
-    # Check for short or empty input data
-    if any(len(ds_profile[var]) <= 1 for var in vars) or len(depth) <= 1:
-        # return DataFrame with expected columns but no data
-        return pd.DataFrame(columns=vars + ['DEPTH', 'PROFILE_NUMBER'])
-
-    for var in vars:
-        var_grid, prof_num_grid, depth_grid = construct_2dgrid(profile_number, depth, ds_profile[var].values[msk],
-                                                                xi=1, yi=binning, x_bin_center=False, y_bin_center=True, agg=agg)
-        binned_data[var] = var_grid[0]
-    binned_data['DEPTH'] = depth_grid[0]
-    binned_data['PROFILE_NUMBER'] = prof_num_grid[0]
-
-    return pd.DataFrame(binned_data)
-
-def bin_all_profiles(ds, vars, binning, agg):
-    """
-    Bins all vertical profiles in the dataset using the specified aggregation method.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset containing vertical profiles.
+        Profile data with at least 'DEPTH', 'TIME', and target variables.
     vars : list of str
-        Variable names to include in the binning process.
-    binning : int or float
-        Vertical bin size in meters.
-    agg : str
+        Variables to be binned.
+    binning : float
+        Bin size in meters (DEPTH) or seconds (TIME).
+    dim : str, default 'DEPTH'
+        Dimension along which to bin ('DEPTH' or 'TIME').
+    agg : str, default 'mean'
         Aggregation method: 'mean' or 'median'.
 
     Returns
     -------
-    ds_binned : xr.Dataset
-        Dataset with variables binned vertically.
+    binned_profile : pd.DataFrame
+        Binned profile data as DataFrame.
     """
+
+    # Ensure single profile
+    profile_number = ds_profile['PROFILE_NUMBER'].values if isinstance(ds_profile, xr.Dataset) else ds_profile.index.values
+    if len(np.unique(profile_number)) > 1:
+        raise ValueError("Only one profile can be selected for binning.")
+
+    binned_data = {}
+
+    # Mask and extract dimension values
+    if dim == 'DEPTH':
+        mask = ds_profile[dim].values > 0
+        dim_values = ds_profile[dim].values[mask]
+    elif dim == 'TIME':
+        dim_values = ds_profile[dim].values.astype('float64') * 1e-9  # convert ns to s
+        mask = np.isfinite(dim_values)
+    else:
+        raise ValueError("`dim` must be either 'DEPTH' or 'TIME'")
+
+    profile_number = profile_number[mask]
+
+    # Handle very short or empty input
+    if len(dim_values) <= 1 or any(len(ds_profile[var]) <= 1 for var in vars):
+        return pd.DataFrame(columns=vars + [dim, 'PROFILE_NUMBER'])
+
+    # Bin each variable
+    for var in vars:
+        var_grid, profile_grid, bin_grid = construct_2dgrid(
+            profile_number, dim_values,ds_profile[var].values[mask],
+            xi=1, yi=binning,
+            x_bin_center=False, y_bin_center=True,
+            agg=agg
+        )
+        binned_data[var] = var_grid[0]
+
+    binned_data[dim] = bin_grid[0] * 1e9 if dim == 'TIME' else bin_grid[0]  # convert back to ns if needed
+    binned_data['PROFILE_NUMBER'] = profile_grid[0]
+
+    df = pd.DataFrame(binned_data)
+
+    if dim == 'DEPTH':
+        if 'TIME' in df.columns:
+            df['TIME'] = pd.to_datetime(df['TIME'], unit='ns', errors='coerce')
+            df = df.set_index('DEPTH')
+            df['TIME'] = df['TIME'].interpolate(method='linear', limit_direction='both')
+            df = df.reset_index()
+
+    return df
+
+def bin_all_profiles(ds, vars, binning, agg='mean', dim='DEPTH'):
+    """
+    Bin all profiles in the dataset along a specified dimension.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset with vertical or time-series profiles.
+    vars : list of str
+        Variables to be included in the binning.
+    binning : float
+        Bin size (in meters for DEPTH or seconds for TIME).
+    agg : str, default 'mean'
+        Aggregation method: 'mean' or 'median'.
+    dim : str, default 'DEPTH'
+        Dimension along which to bin: 'DEPTH' or 'TIME'.
+
+    Returns
+    -------
+    ds_binned : xr.Dataset
+        Binned dataset.
+    """
+
     if agg not in ['mean', 'median']:
         raise ValueError("agg must be 'mean' or 'median'")
 
     required_vars = ['DEPTH', 'TIME', 'LONGITUDE', 'LATITUDE']
     all_vars = list(set(vars + required_vars))
 
-    # Group by profile
-    groups = group_by_profiles(ds, all_vars)
+    # Group dataset by profiles
+    grouped = group_by_profiles(ds, all_vars)
 
-    # Apply binning to each profile group
-    binned_data = groups.apply(bin_profile, vars=all_vars, binning=binning, agg=agg)
+    # Apply binning to each profile
+    binned_df = grouped.apply(bin_profile, vars=all_vars, binning=binning, agg=agg, dim=dim)
 
     # Clean up DataFrame
-    if 'PROFILE_NUMBER' in binned_data.columns:
-        binned_data = binned_data.drop('PROFILE_NUMBER', axis=1)
-        binned_data = binned_data.reset_index()
-    if 'level_1' in binned_data.columns:
-        binned_data = binned_data.drop('level_1', axis=1)
-    if 'TIME' in binned_data.columns:
-        binned_data = binned_data.set_index('TIME')
+    if 'PROFILE_NUMBER' in binned_df.columns:
+        binned_df = binned_df.drop('PROFILE_NUMBER', axis=1)
+        binned_df = binned_df.reset_index()
+    if 'level_1' in binned_df.columns:
+        binned_df = binned_df.drop('level_1', axis=1)
+    if 'TIME' in binned_df.columns:
+        binned_df = binned_df.set_index('TIME')
 
     # Convert to xarray Dataset
-    ds_binned = xr.Dataset.from_dataframe(binned_data)
+    ds_binned = xr.Dataset.from_dataframe(binned_df)
 
     # Convert time to datetime format
     if 'TIME' in ds_binned:
@@ -495,6 +517,8 @@ def bin_all_profiles(ds, vars, binning, agg):
     ds_binned.attrs = ds.attrs.copy()
     ds_binned.attrs['binning'] = binning
     ds_binned.attrs['binning_method'] = agg
+
+    ds_binned = ds_binned.sortby('TIME')
 
     return ds_binned
 

@@ -151,7 +151,7 @@ def plot_glider_track(ds: xr.Dataset, mean_profile = False, ax: plt.Axes = None,
 
     return fig, ax
 
-def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','DENSITY'], use_bins: bool = False, binning: float = 2) -> tuple:
+def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','SIGMA_T'], use_bins: bool = False, binning: float = 2,ax1 = None) -> tuple:
     """
     Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
 
@@ -183,7 +183,12 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
     vars = [v for v in vars if v] 
     # If vars is empty, show an empty plot
     if not vars:
-        fig, ax1 = plt.subplots(figsize=(12, 9))
+        if ax1 is None:  
+            fig, ax1 = plt.subplots(figsize=(12, 9))
+            force_plot = True
+        else:
+            fig = plt.gcf()
+            force_plot = False
         ax1.set_title(f'Profile {profile_num} (No Variables Selected)')
         ax1.set_ylabel('Depth (m)')
         ax1.invert_yaxis()
@@ -193,8 +198,13 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
     if len(vars) > 3:
         raise ValueError("Only three variables can be plotted at once, chose less variables")
     
-    with plt.style.context(plotting_style):  
-        fig, ax1 = plt.subplots(figsize=(12, 9)) 
+    with plt.style.context(plotting_style):
+        if ax1 is None:  
+            fig, ax1 = plt.subplots(figsize=(12, 9))
+            force_plot = True
+        else:
+            fig = plt.gcf()
+            force_plot = False
 
         profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
         if use_bins:
@@ -232,7 +242,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
 
     return fig, ax1
 
-def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: float = 2):
+def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: float = 2,ax = None) -> tuple:
     """
     Plots the convective resistance (CR) of a profile against depth based on calculate_CR_for_all_depth function.
     For the calculation, the density anomaly with reference to 1000 kg/m3 is used ('SIGMA_1')
@@ -272,7 +282,12 @@ def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: f
     CR = CR_df['CR'].values
 
     with plt.style.context(plotting_style):
-        fig, ax = plt.subplots(figsize=(12, 9))
+        if ax is None:  
+            fig, ax = plt.subplots(figsize=(12, 9)) 
+            force_plot = True
+        else:
+            fig = plt.gcf()
+            force_plot = False
         ax.plot(CR, depth, label='CR')
         ax.scatter(CR, depth, marker='o', s=10+binning)
         ax.set_xlabel('Convective Resistance (CR)')
@@ -423,16 +438,61 @@ def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
         depth = profile.DEPTH.values
         distances = np.abs(np.diff(depth))
 
+        if np.abs(distances-distances[0]).max() < 0.01:  # all distances are the same
+            width = 0.5
+            bins = [distances[0]-width/2, distances[0]+width/2]
+            x_lim = [0, 2*distances[0]]
+        else:
+            bins = 20  # default bin count
+            x_lim = [0, np.nanmax(distances)*1.2]
+
         # Plot histogram of vertical distances
-        ax.hist(distances, bins=20, color='blue', alpha=0.7)#,density=True)#,stacked=True)
+        ax.hist(distances, bins=bins, color='blue', alpha=0.7)#,density=True)#,stacked=True)
         ax.set_xlabel('Vertical Distance (m)')
         ax.set_ylabel('Number of Measurements')
         ax.set_title(f'Profile {profile_num} Vertical Resolution')
 
     return fig, ax
 
+def plot_time_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
+    """
+    Plots a histogram of the time differences between consecutive measurements.
 
-def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict) -> tuple({plt.Figure, plt.Axes}):
+    Parameters
+    ----------
+    ds: xarray.Dataset
+        Xarray dataset in OG1 format with at least TIME
+    profile_num: int
+        The profile number to plot.
+
+    Returns
+    -------
+    fig: matplotlib.figure.Figure
+        The figure object containing the plot.
+    ax: matplotlib.axes.Axes
+        The axis object containing the primary plot.
+    """
+    with plt.style.context(plotting_style):  # Assuming `plotting_style` is defined elsewhere
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        # Select the specific profile
+        profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
+        depth = profile.DEPTH.values
+        depth_diff = np.diff(depth)
+        time = profile.TIME.values.astype('float64')
+        time_diff = np.diff(time) * 1e-9
+        ### take out all time_diff values that are larger than 30 seconds and print them
+        print('Time differences larger than 30 seconds:', time_diff[time_diff >= 31] , 'at depths:', (depth[1:][time_diff >= 31]+depth[:-1][time_diff >= 31])/2)
+        time_diff = time_diff[time_diff <= 31]
+        # Plot histogram of time differences
+        ax.hist(time_diff, bins=20, color='blue', alpha=0.7)
+        ax.set_xlabel('Time Difference (s)')
+        ax.set_ylabel('Number of Measurements')
+        ax.set_title(f'Profile {profile_num} Time Resolution')
+
+    return fig, ax
+
+def plot_min_max_depth(ds: xr.Dataset, bins= 20, ax = None, **kw: dict):
     """
     This function can be used to plot the maximum depth of each profile in a dataset.
     
@@ -644,207 +704,6 @@ def plot_dive_depth(ds, dive_number):
         ### only plot the time at the x-ticks and the date at the x-labels
         ax.grid(True)
     return fig, ax
-"""
-def plot_histograms(ds, vars: list, bins: int):
-
-    This function plots histograms for the specified variables in a dataset.
-    It also computes the sample mean, standard deviation (sigma), and variance (sigma^2),
-    and adds them as vertical lines.
-
-    Parameters
-    ----------
-    ds: xarray.Dataset
-        Xarray dataset with the variables to plot.
-    vars: list
-        A list of variable names to plot.
-    bins: int
-        The number of bins for the histograms.
-
-    Returns
-    -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    axes: list
-        List of axis objects containing the plots.
-    
-    num_vars = len(vars)
-    cols = 2  # Number of columns per row
-    rows = int(np.ceil(num_vars / cols))  # Determine number of rows needed
-
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 6 * rows))  # Adjust figure size dynamically
-    axes = axes.flatten() if num_vars > 1 else [axes]  # Flatten in case of multiple subplots
-
-    for i, var in enumerate(vars):
-        ax = axes[i]
-        data = ds[var].values.flatten()  # Convert to NumPy array for calculations
-        
-        mean_value = np.nanmean(data)  # Compute sample mean, ignoring NaNs
-        std_dev = np.nanstd(data)  # Compute standard deviation (sigma), ignoring NaNs
-        variance = std_dev ** 2  # Compute variance (sigma^2)
-
-        ds[var].plot.hist(ax=ax, bins=bins, alpha=0.5, label=var)
-
-        # Add vertical lines for mean and ± sigma (standard deviation)
-        ax.axvline(mean_value, color='r', linestyle='dashed', linewidth=2, label=f'Mean μ: {mean_value:.2f}')
-        ax.axvline(mean_value + std_dev, color='g', linestyle='dotted', linewidth=2, label=f'Std dev. σ: {std_dev:.2f}')
-        ax.axvline(mean_value - std_dev, color='g', linestyle='dotted', linewidth=2)
-
-        # Fetch description (long_name) from variable attributes
-        var_desc = ds[var].attrs.get("long_name", var)
-        unit = ds[var].attrs.get("units", "")
-
-        # Update title to include mean, variance (σ²), and standard deviation (σ)
-        ax.set_title(f"Histogram of {var_desc}\nμ={mean_value:.2f}, σ={std_dev:.2f}, σ²={variance:.2f}")
-
-        ax.set_xlabel(f'{var} ({unit})')
-        ax.set_ylabel('Frequency')
-        ax.legend()
-
-    # Remove any empty subplots if variables are not a multiple of cols
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-
-    plt.tight_layout()
-    return fig, axes
-"""
-
-def plot_histograms(ds, vars: list, bins: int):
-    """
-    Plots histograms for the specified variables in a dataset.
-    If "TIME" is included, it plots the difference between consecutive timestamps.
-
-    Parameters
-    ----------
-    ds: xarray.Dataset
-        Xarray dataset with the variables to plot.
-    vars: list
-        List of variable names to plot.
-    bins: int
-        The number of bins for the histograms.
-
-    Returns
-    -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    axes: list
-        List of axis objects containing the plots.
-    """
-    num_vars = len(vars)
-    cols = 2  # Number of columns per row
-    rows = int(np.ceil(num_vars / cols))  # Number of rows needed
-
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 6 * rows))  # Dynamic figure size
-
-    # Ensure axes is always iterable
-    if num_vars == 1:
-        axes = np.array([axes])  # Convert single axis to an array
-
-    axes = axes.flatten()  # Flatten to ensure indexing works
-
-    for i, var in enumerate(vars):
-        ax = axes[i]
-
-        # Handle "TIME" separately by computing differences
-        if var == "TIME":
-            time_values = ds[var].values.flatten()
-            time_diffs = np.diff(time_values).astype('timedelta64[s]').astype(float)/3600  # Convert to seconds
-            data = time_diffs
-            xlabel = "Time Difference (hours)"
-            var_desc = "Time Intervals"
-            print('Max time difference:', np.max(time_diffs))
-        else:
-            data = ds[var].values.flatten()  # Convert to NumPy array for calculations
-            xlabel = f"{var} ({ds[var].attrs.get('units', '')})"
-            var_desc = ds[var].attrs.get("long_name", var)
-
-        # Compute statistics
-        mean_value = np.nanmean(data)  # Sample mean, ignoring NaNs
-        std_dev = np.nanstd(data)  # Standard deviation (σ)
-        variance = std_dev ** 2  # Variance (σ²)
-
-        # Ensure `data` is not empty before plotting
-        if len(data) > 0:
-            ax.hist(data, bins=bins, alpha=0.5, label=var, color='steelblue', edgecolor='black')
-
-            # Add vertical lines for mean and ± sigma
-            ax.axvline(mean_value, color='r', linestyle='dashed', linewidth=2, label=f'Mean μ: {mean_value:.2f}')
-            ax.axvline(mean_value + std_dev, color='g', linestyle='dotted', linewidth=2, label=f'Std dev. σ: {std_dev:.2f}')
-            ax.axvline(mean_value - std_dev, color='g', linestyle='dotted', linewidth=2)
-
-            # Set title and labels
-            ax.set_title(f"Histogram of {var_desc}\nμ={mean_value:.2f}, σ={std_dev:.2f}, σ²={variance:.2f}")
-            ax.set_xlabel(xlabel)
-            ax.set_ylabel("Frequency")
-            ax.legend()
-        else:
-            ax.set_title(f"No data available for {var_desc}")
-
-    # Remove empty subplots if variables are not a multiple of cols
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-
-    plt.tight_layout()
-    return fig, axes
-
-
-def plot_filtered_data(ds_filtered, vars, time_range=None):
-    """
-    Plots the original, filtered, and residual (difference) data for the given variables.
-    The residual is plotted separately below the main plots.
-
-    Parameters
-    ----------
-    ds_filtered : xarray.Dataset
-        The dataset containing both the original and filtered variables.
-    vars : list of str
-        The variable names to plot (e.g., ['u10', 'v10']).
-    time_range : tuple of str (optional)
-        A tuple specifying the time range (start, end) in a format recognized by xarray (e.g., '2008-12-01', '2008-12-31').
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The figure object containing the plots.
-    axes : list
-        The list of axes objects.
-    """
-    num_vars = len(vars)
-
-    # Apply time range if specified
-    if time_range:
-        ds_filtered = ds_filtered.sel(valid_time=slice(*time_range))
-
-    # Create subplots: 2 rows per variable (original+filtered and residual)
-    fig, axes = plt.subplots(num_vars * 2, 1, figsize=(20, 8 * num_vars), sharex=True)
-
-    if num_vars == 1:
-        axes = [axes]  # Ensure axes is always iterable
-
-    for i, var in enumerate(vars):
-        ax_main = axes[i * 2]  # Main plot (original + filtered)
-        ax_residual = axes[i * 2 + 1]  # Residual plot
-
-        residual = ds_filtered[var] - ds_filtered[f"{var}_hann_filtered"]
-
-        # Plot original and filtered data
-        ds_filtered[var].plot(ax=ax_main, label="Original", color="C0", linewidth=2)
-        ds_filtered[f"{var}_hann_filtered"].plot(ax=ax_main, label="Filtered", color="C1", linewidth=2)
-
-        ax_main.legend()
-        ax_main.set_title(f"{var} (Original & Filtered)")
-        ax_main.set_ylabel("m/s")
-
-        # Plot residual separately
-        residual.plot(ax=ax_residual, label="Residual", color="C2", linestyle="dashed")
-        ax_residual.legend()
-        ax_residual.set_title(f"{var} Residual (Original - Filtered)")
-        ax_residual.set_ylabel("Residual (m/s)")
-
-    axes[-1].set_xlabel("Time")  # Set xlabel only on the last subplot
-    plt.tight_layout()
-    plt.show()
-
-    return fig, axes
 
 def plot_winds_at_time(ds, time):
     """
