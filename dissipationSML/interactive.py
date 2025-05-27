@@ -105,7 +105,9 @@ def interactive_profile(ds,profile_slider):
 
     # Variable selection dropdowns (with an empty option)
     # take only into account the variables with float or int data type
-    var_options = [''] + [var for var in ds.data_vars if ds[var].dtype.kind in {'i', 'f'}]
+    var_options = ['','TIME'] + [var for var in ds.data_vars if ds[var].dtype.kind in {'i', 'f'}]
+    ### also add the possible coordinates
+    var_options += [var for var in ds.coords if ds[var].dtype.kind in {'i', 'f'}]
 
     var1_dropdown = widgets.Dropdown(options=var_options, value=var_options[0], description="Var 1:")
     var2_dropdown = widgets.Dropdown(options=var_options, value=var_options[0], description="Var 2:")

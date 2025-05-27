@@ -90,7 +90,7 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     depth = ds['DEPTH'].values
     glider_velo = ds['GLIDER_VERT_VELO_MODEL'].values
     # Clean glider velocity data
-    glider_velo[np.abs(glider_velo) > 15] = np.nan
+    #glider_velo[np.abs(glider_velo) > 20] = np.nan
 
     # Calculate vertical velocity from depth change (central difference, cm/s)
     ddepth = -(depth[2:] - depth[:-2]) * 100  # cm
@@ -102,12 +102,12 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     # Estimate measured vertical velocity
     w_meas = ddepth / dtime
     w_meas = np.concatenate(([np.nan], w_meas, [np.nan]))  # Pad ends with NaN
-    w_meas[np.abs(w_meas) > 15] = np.nan  # Filter unrealistic values
+    #w_meas[np.abs(w_meas) > 25] = np.nan  # Filter unrealistic values
 
 
     # Estimate vertical water velocity
     w_water = w_meas - glider_velo
-    w_water[np.abs(w_water) > 5] = np.nan
+    #w_water[np.abs(w_water) > 5] = np.nan
     w_water[depth < 10] = np.nan  # Ignore shallow data
 
     # Create DataArrays with metadata
@@ -263,6 +263,89 @@ def trim_nan_edges(arr):
     first = np.argmax(is_not_nan)
     last = len(arr) - np.argmax(is_not_nan[::-1])
     return arr[first:last], first, last
+
+import numpy as np
+import xarray as xr
+from scipy.signal import butter, filtfilt
+from tqdm import tqdm
+import pandas as pd
+
+def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=40):
+    """
+    Applies a highpass Butterworth filter to a variable over time, per profile.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset with TIME and PROFILE_NUMBER dimensions.
+    var : str
+        Variable to filter.
+    cutoff_period : float, optional
+        Highpass cutoff period in seconds (default 330s).
+    order : int, optional
+        Butterworth filter order (default 4).
+    max_interval : float, optional
+        Max gap (in seconds) to treat data as continuous (default 40s).
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with an added filtered variable: {var}_filtered.
+    """
+    def filter_profile(profile):
+        time = profile.TIME.values
+        dt = np.diff(time) / np.timedelta64(1, 's')
+        dt[dt > max_interval] = np.nan
+        if np.all(np.isnan(dt)):
+            print("All time intervals are NaN, skipping profile.")
+            return None
+        mean_dt = np.nanmean(dt)
+        if mean_dt == 0:
+            print("Mean time interval is zero, skipping profile.")
+            return None
+
+        fs = 1 / mean_dt
+        fc = 1 / cutoff_period
+        wn = fc / (fs / 2)
+        b, a = butter(order, wn, btype='high')
+
+        binned_df = bin_profile(profile, [var, 'DEPTH'], binning=mean_dt, dim='TIME')
+        signal = binned_df[var].values
+
+        profile_filtered = np.full_like(signal, np.nan)
+        trimmed, start, end = trim_nan_edges(signal)
+
+        # Interpolate NaNs before filtering
+        if np.isnan(trimmed).any():
+            trimmed = pd.Series(trimmed).interpolate(
+                method='linear', limit_direction='both').values
+
+        if len(trimmed) > 3 * max(len(a), len(b)):
+            filtered = filtfilt(b, a, trimmed)
+            profile_filtered[start:end] = filtered
+
+        binned_df[f'{var}_filtered'] = profile_filtered
+        binned_df['PROFILE_NUMBER'] = profile.PROFILE_NUMBER.values[0]
+        return xr.Dataset.from_dataframe(binned_df.set_index('TIME'))
+
+    # Process each profile with progress bar
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
+    filtered = [
+        filter_profile(ds.where(ds.PROFILE_NUMBER==pn, drop=True))
+        for pn in tqdm(profile_numbers, desc=f"Filtering {var}")
+    ]
+
+    filtered = [f for f in filtered if f is not None]
+    if not filtered:
+        return xr.Dataset()
+
+    result = xr.concat(filtered, dim='TIME')
+    result = result.sortby('TIME')
+    result.attrs = ds.attrs
+    result[f'{var}_filtered'].attrs = ds[var].attrs
+    result[f'{var}_filtered'].attrs['filter'] = 'highpass_time'
+
+    return result
 
 def highpass_butterworth(ds_binned, var, cutoff_wavelength=30, order=4):
     """
@@ -450,14 +533,15 @@ def bin_profile(ds_profile, vars, binning, dim='DEPTH', agg='mean'):
     binned_data['PROFILE_NUMBER'] = profile_grid[0]
 
     df = pd.DataFrame(binned_data)
+    if 'TIME' in df.columns or 'TIME' in df.index:
+        df['TIME'] = pd.to_datetime(df['TIME'], unit='ns', errors='coerce')
 
     if dim == 'DEPTH':
         if 'TIME' in df.columns:
-            df['TIME'] = pd.to_datetime(df['TIME'], unit='ns', errors='coerce')
             df = df.set_index('DEPTH')
             df['TIME'] = df['TIME'].interpolate(method='linear', limit_direction='both')
             df = df.reset_index()
-
+    
     return df
 
 def bin_all_profiles(ds, vars, binning, agg='mean', dim='DEPTH'):
@@ -558,7 +642,7 @@ def group_by_profiles(ds, variables=None):
         return ds.groupby("PROFILE_NUMBER")
 
 def compute_mld(ds: xr.Dataset, variable, method: str = 'threshold', threshold = 0.03, ref_depth = 10,
-                 use_bins: bool = False, binning: float = 10):
+                 use_bins: bool = True, binning: float = 10):
     """
     Computes the mixed layer depth (MLD) for each profile in the dataset. Two methods are available:
     1. **Threshold Method**: Computes MLD based on a density threshold (default is 0.03 kg/m³).

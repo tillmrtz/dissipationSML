@@ -313,9 +313,9 @@ colormaps = {
     'SIGTHETA': cmo.dense,
     'SIGTHETA_RAW': cmo.dense,
     'PRES': cmo.deep,
-    'GLIDER_VERT_VELO_MODEL': cmo.speed,
-    'GLIDER_HORZ_VELO_MODEL': cmo.speed,
-    'GLIDE_SPEED': cmo.speed,
+    'GLIDER_VERT_VELO_MODEL': cmo.delta,
+    'GLIDER_HORZ_VELO_MODEL': cmo.delta,
+    'GLIDE_SPEED': cmo.delta,
     'VERTICAL_WATER_VELOCITY': cmo.delta,
 }
 
