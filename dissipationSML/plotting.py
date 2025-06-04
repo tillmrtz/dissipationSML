@@ -313,10 +313,13 @@ colormaps = {
     'SIGTHETA': cmo.dense,
     'SIGTHETA_RAW': cmo.dense,
     'PRES': cmo.deep,
+    'ADIABATIC_N2': cmo.dense,
+    #'UNSORTED_N2': cmo.dense,
     'GLIDER_VERT_VELO_MODEL': cmo.delta,
     'GLIDER_HORZ_VELO_MODEL': cmo.delta,
     'GLIDE_SPEED': cmo.delta,
     'VERTICAL_WATER_VELOCITY': cmo.delta,
+    'VELOCITY_SCALE':cmo.delta,
 }
 
 def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None, add_MLD=None):
@@ -350,9 +353,15 @@ def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, 
         The axis objects containing the subplots.
     """
     ### cut the dataset to the time range
+    dim = list(ds.dims.keys())[0]
     if start_date is not None or end_date is not None:
         mask = (ds.TIME >= np.datetime64(start_date)) & (ds.TIME <= np.datetime64(end_date))
-        ds = ds.sel(N_MEASUREMENTS=mask)
+        if dim == 'N_MEASUREMENTS':
+            ds = ds.sel(N_MEASUREMENTS=mask)
+        elif dim == 'TIME':
+            ds = ds.sel(TIME=mask)
+        else:
+            raise ValueError(f"Unsupported dimension '{dim}' for time selection. Expected 'N_MEASUREMENTS' or 'TIME'.")
         if add_MLD is not None:
             add_MLD = add_MLD[(add_MLD['TIME'] >= start_date) & (add_MLD['TIME'] <= end_date)]
 
@@ -851,11 +860,13 @@ def plot_var_from_mld(mld_ds, var, years, rolling_str='12h'):
         if var == 'MLD':
             ax.set_ylim(0, 700)
             ax.invert_yaxis()
-        ax.set_ylabel(f'{var} (m)')
-        ax.set_title(f'{var} colored by Mission - {year}', fontsize=16)
+        ax.set_ylabel(f'{var} [W m kg⁻¹]',fontsize=18)
+        ax.set_title(f'{var} colored by Mission - {year}', fontsize=20)
         ax.grid(True)
+        ### set ticks size to 18
+        ax.tick_params(axis='both', which='major', labelsize=18)
 
-    axes[-1].set_xlabel('Time', fontsize=14)
+    axes[-1].set_xlabel('Time', fontsize=18)
     fig.tight_layout(rect=[0, 0, 1, 1])
 
     # Shared colorbar

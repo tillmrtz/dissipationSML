@@ -139,6 +139,278 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
 
     return ds
 
+
+def adiabatic_N2_profile(press, temp, SA, lat, plev=20):
+    """
+    Compute adiabatic N² for a single vertical profile.
+
+    Parameters
+    ----------
+    press : 1D array
+        Pressure in dbar
+    temp : 1D array
+        In-situ temperature in °C
+    SA : 1D array
+        Absolute salinity in g/kg
+    lat : float
+        Latitude of the profile in degrees
+    plev : float, optional
+        Pressure level in dbar for averaging (default is 20 dbar)
+
+    Returns
+    -------
+    n2_bray : 1D array
+        Brunt–Väisälä frequency squared (N²) estimate
+    """
+    press = np.array(press)
+    temp = np.array(temp)
+    SA = np.array(SA)
+
+    n = len(press)
+    n2_bray = np.full(n, np.nan)
+    nan_warning_levels = []  # store pressure levels with all-NaN density
+
+    for jj in range(n):
+        if np.isnan(press[jj]):
+            continue
+
+        # Define pressure window
+        pmin_lev = max(press[jj] - plev / 2, np.nanmin(press))
+        pmax_lev = min(press[jj] + plev / 2, np.nanmax(press))
+        icyc = np.where((press >= pmin_lev) & (press <= pmax_lev))[0]
+
+        if len(icyc) == 0:
+            continue
+
+        pbar = np.nanmean(press[icyc])
+        theta = gsw.pt_from_t(SA[icyc], temp[icyc], press[icyc], pbar)
+        rho = gsw.density.rho(SA[icyc], theta, press[icyc])
+
+        if np.all(np.isnan(rho)):
+            nan_warning_levels.append(pbar)
+            continue
+
+        rhobar = np.nanmean(rho)
+        pot_rho = gsw.pot_rho_t_exact(SA[icyc], temp[icyc], press[icyc], rhobar)
+        sv = 1 / pot_rho
+
+        if len(press[icyc]) > 1:
+            press_pas = press[icyc] * 1e4  # convert dbar to Pa
+            coeffs = np.polyfit(press_pas, sv, 1)
+            alpha_1 = coeffs[0]
+
+            depth = -gsw.z_from_p(pbar, lat)
+            g = gsw.grav(lat, depth)
+
+            n2_bray[jj] = rhobar**2 * g**2 * -alpha_1
+
+    # Print summary warning if any full-NaN density windows were found
+    if nan_warning_levels:
+        formatted = ", ".join(f"{p:.1f}" for p in nan_warning_levels)
+        #print(f"Warning: All density values were NaN at the following pressure levels (dbar): {formatted}")
+
+    return n2_bray
+
+
+def add_adiabatic_sorted_N2(ds, plev = 20):
+    """
+    Calculate adiabatic N² for each profile in the dataset and add it as a new variable.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset containing the necessary variables.
+    plev : float, optional
+        Pressure level in dbar for averaging (default is 20 dbar).
+    
+    Returns
+    -------
+    ds : xarray.Dataset
+        The dataset with the adiabatic N² variable added.
+    """
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
+    n2_list = []
+    for profile_number in tqdm(profile_numbers):
+        profile_data = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
+        PRES = profile_data.PRES.values
+        TEMP = profile_data.TEMP.values
+        PSAL = profile_data.PSAL.values
+        ### mean the lat and long values for the profile
+        lat = np.nanmean(profile_data.LATITUDE.values)
+        long = np.nanmean(profile_data.LONGITUDE.values)
+        SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
+        
+        n2_bray = adiabatic_N2_profile(PRES, TEMP, SA, lat, plev=plev)
+        n2_list.append(n2_bray)
+    n2_bray_sorted = np.concatenate(n2_list)
+
+    dims = list(ds.dims.keys())[0]
+
+    n2_bray_sorted = xr.DataArray(n2_bray_sorted, dims=dims,attrs={
+        'long_name': 'Adiabatic Brunt-Väisälä frequency squared',
+        'units': '1/s^2',
+        'plev': plev
+    })
+
+    ds['ADIABATIC_N2'] = n2_bray_sorted
+
+    return ds
+
+def add_unsorted_N2(ds):
+    """
+    Calculate adiabatic N² for each profile in the dataset and add it as a new variable.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset containing the necessary variables.
+    
+    Returns
+    -------
+    ds : xarray.Dataset
+        The dataset with the adiabatic N² variable added.
+    """
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
+    n2_list = []
+    for profile_number in tqdm(profile_numbers):
+        profile_data = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
+        PRES = profile_data.PRES.values
+        TEMP = profile_data.TEMP.values
+        PSAL = profile_data.PSAL.values
+        ### mean the lat and long values for the profile
+        lat = np.nanmean(profile_data.LATITUDE.values)
+        long = np.nanmean(profile_data.LONGITUDE.values)
+        SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
+        CT = gsw.CT_from_t(SA, TEMP, PRES)
+        
+        n2,p_mid = gsw.Nsquared(SA,CT,PRES,lat)
+        ### add one value to the end of the array to match the length of the profile
+        n2 = np.append(n2, np.nan)
+        n2_list.append(n2)
+    
+    n2_unsorted = np.concatenate(n2_list)
+    dims = list(ds.dims.keys())[0]
+    n2_unsorted = xr.DataArray(n2_unsorted, dims=dims, attrs={
+        'long_name': 'Unsroted Brunt-Väisälä frequency squared',
+        'units': '1/s^2'
+    })
+
+    ds['UNSORTED_N2'] = n2_unsorted
+
+    return ds
+
+def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_filtered', window_size_seconds=100):
+    """
+    Compute RMS of velocity in a moving window for each profile and add it to the dataset as 'VELOCITY_SCALE'.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with velocity and TIME coordinate.
+    var : str
+        Name of the velocity variable to process.
+    window_size_seconds : float
+        Size of the time window in seconds for computing RMS.
+        
+    Returns
+    -------
+    ds : xr.Dataset
+        The dataset with an added 'VELOCITY_SCALE' variable.
+    """
+    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
+    all_velocity_scales = []
+    dims = list(ds.dims.keys())[0]
+
+    for profile_number in tqdm(profile_numbers, desc="Processing profiles"):
+        if dims == 'N_MEASUREMENTS':
+            ds_profile = ds.sel(N_MEASUREMENTS=ds.PROFILE_NUMBER == profile_number)
+        elif dims == 'TIME':
+            ds_profile = ds.sel(TIME=ds.PROFILE_NUMBER == profile_number)
+        
+
+        time_vals = ds_profile.TIME.values
+        if len(time_vals) < 2:
+            # Not enough data for rolling window
+            all_velocity_scales.append(xr.DataArray(np.full_like(ds_profile[var], np.nan)))
+            continue
+
+        # Calculate time deltas in seconds
+        time_deltas = np.diff(time_vals) / np.timedelta64(1, 's')
+        time_deltas = time_deltas[time_deltas < 100]  # Filter long gaps
+        if len(time_deltas) == 0:
+            mean_delta = 1  # Default to 1 second to avoid division by zero
+        else:
+            mean_delta = np.mean(time_deltas)
+
+        # Convert time window to number of samples
+        window_size = max(1, int(window_size_seconds / mean_delta))
+
+        # Compute RMS
+        velocity_squared = ds_profile[var] ** 2
+        velocity_scale = velocity_squared.rolling(TIME=window_size, center=True).mean() ** 0.5
+
+        all_velocity_scales.append(velocity_scale)
+
+    # Concatenate across profiles
+    full_velocity_scale = xr.concat(all_velocity_scales, dim=dims)
+    full_velocity_scale = full_velocity_scale.sortby(ds.TIME)  # Optional: reorder to match original
+
+    # Add to dataset
+    ds['VELOCITY_SCALE'] = full_velocity_scale
+    ds['VELOCITY_SCALE'].attrs = {
+        'long_name': 'Velocity scale',
+        'description': f'RMS of {var} in ±{window_size_seconds / 2} second window per profile',
+        'units': ds[var].attrs.get('units', 'cm/s'),
+        'window_size_seconds': window_size_seconds
+    }
+
+    return ds
+
+def LEM_dissipation(ds, c=0.37):
+    """
+    Calculate turbulent kinetic energy dissipation rate using the Large Eddy Method (LEM):
+        ε = c * N * (q')^2
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset containing 'ADIABATIC_N2' and 'VELOCITY_SCALE' variables.
+    c : float, optional
+        Model constant, default is 0.37 (typical value for LEM).
+
+    Returns
+    -------
+    ds : xr.Dataset
+        The dataset with a new variable 'DISSIPATION_LEM'.
+    """
+    # Ensure required variables exist
+    if 'ADIABATIC_N2' not in ds or 'VELOCITY_SCALE' not in ds:
+        raise ValueError("Dataset must contain 'ADIABATIC_N2' and 'VELOCITY_SCALE' variables.")
+
+    # Compute dissipation
+    velocity_scale = ds['VELOCITY_SCALE'] / 100 # convert cm/s to m/s
+    N = ds['ADIABATIC_N2'] ** 0.5
+    dissipation = c * N * (velocity_scale ** 2)
+    dissipation_log = np.log10(dissipation)
+
+    # Add to dataset with metadata
+    ds['DISSIPATION_LEM'] = dissipation
+    ds['DISSIPATION_LEM'].attrs = {
+        'long_name': 'Turbulent kinetic energy dissipation rate (LEM)',
+        'description': "Calculated as ε = c * N * (q')² using Large Eddy Method",
+        'units': 'W/kg',  # Assuming N in 1/s and q' in m/s
+        'c_epsilon': c
+    }
+    ds['DISSIPATION_LEM_LOG'] = dissipation_log
+    ds['DISSIPATION_LEM_LOG'].attrs = {
+        'long_name': 'Log10 of turbulent kinetic energy dissipation rate (LEM)',
+        'description': "Logarithm of the dissipation rate for better visualization",
+        'units': 'log10(W/kg)'
+    }
+
+    return ds
+
+
 def rms_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: float) -> xr.Dataset:
     """
     Calculate the Root Mean Square (RMS) of variables between min_depth and the mixed layer depth (MLD) for each profile.
@@ -183,7 +455,7 @@ def rms_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: float)
             values_in_range = profile_values.where(valid_mask, drop=True)
 
             # Compute RMS and store
-            rms = np.sqrt((values_in_range ** 2).mean().values)
+            
             rms_values.append(rms)
 
         # Add the result to the MLD dataset
@@ -238,6 +510,58 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
 
         # Add the result to the MLD dataset
         mld_ds[var + '_MEAN'] = ('TIME', mean_values)
+
+    return mld_ds
+
+from scipy.integrate import trapezoid
+
+def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: float = 0) -> xr.Dataset:
+    """
+    Integrate variables between min_depth and the mixed layer depth (MLD) for each profile,
+    safely handling NaNs.
+    """
+    mld_ds = mld_ds.copy()
+
+    for var in vars:
+        print(f"Calculating integral for {var}...")
+        integral_values = []
+
+        for i in tqdm(range(len(mld_ds['PROFILE_NUMBER']))):
+            profile_number = mld_ds['PROFILE_NUMBER'].values[i]
+            mld_depth = mld_ds['MLD'].values[i]
+
+            if np.isnan(mld_depth):
+                integral_values.append(np.nan)
+                continue
+
+            # Extract profile data
+            profile_mask = ds['PROFILE_NUMBER'] == profile_number
+            profile_values = ds[var].where(profile_mask, drop=True)
+            profile_depth = ds['DEPTH'].where(profile_mask, drop=True)
+
+            # Drop NaNs in both arrays
+            valid = (~np.isnan(profile_values)) & (~np.isnan(profile_depth))
+            if valid.sum() < 2:
+                integral_values.append(np.nan)
+                continue
+
+            profile_values = profile_values.values[valid]
+            profile_depth = profile_depth.values[valid]
+
+            # Sort by depth
+            sort_idx = np.argsort(profile_depth)
+            depth_sorted = profile_depth[sort_idx]
+            values_sorted = profile_values[sort_idx]
+
+            # Mask within integration bounds
+            mask = (depth_sorted >= min_depth) & (depth_sorted <= mld_depth)
+            if np.count_nonzero(mask) >= 2:
+                integral_value = trapezoid(values_sorted[mask], depth_sorted[mask])
+                integral_values.append(integral_value)
+            else:
+                integral_values.append(np.nan)
+
+        mld_ds[var + '_TOTAL'] = ('TIME', integral_values)
 
     return mld_ds
 
@@ -309,7 +633,7 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
         wn = fc / (fs / 2)
         b, a = butter(order, wn, btype='high')
 
-        binned_df = bin_profile(profile, [var, 'DEPTH'], binning=mean_dt, dim='TIME')
+        binned_df = bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE'], binning=mean_dt, dim='TIME')
         signal = binned_df[var].values
 
         profile_filtered = np.full_like(signal, np.nan)
