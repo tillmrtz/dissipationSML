@@ -184,7 +184,8 @@ def adiabatic_N2_profile(press, temp, SA, lat, plev=20):
 
         pbar = np.nanmean(press[icyc])
         theta = gsw.pt_from_t(SA[icyc], temp[icyc], press[icyc], pbar)
-        rho = gsw.density.rho(SA[icyc], theta, press[icyc])
+        CT = gsw.CT_from_t(SA[icyc], temp[icyc], press[icyc])
+        rho = gsw.density.rho(SA[icyc], CT, press[icyc])
 
         if np.all(np.isnan(rho)):
             nan_warning_levels.append(pbar)
@@ -210,7 +211,6 @@ def adiabatic_N2_profile(press, temp, SA, lat, plev=20):
         #print(f"Warning: All density values were NaN at the following pressure levels (dbar): {formatted}")
 
     return n2_bray
-
 
 def add_adiabatic_sorted_N2(ds, plev = 20):
     """
@@ -353,16 +353,36 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_filtered', window_size_s
 
     # Concatenate across profiles
     full_velocity_scale = xr.concat(all_velocity_scales, dim=dims)
-    full_velocity_scale = full_velocity_scale.sortby(ds.TIME)  # Optional: reorder to match original
+    full_velocity_scale = full_velocity_scale.sortby(ds.TIME) / 100 # convert cm/s to m/s
 
     # Add to dataset
     ds['VELOCITY_SCALE'] = full_velocity_scale
     ds['VELOCITY_SCALE'].attrs = {
         'long_name': 'Velocity scale',
         'description': f'RMS of {var} in ±{window_size_seconds / 2} second window per profile',
-        'units': ds[var].attrs.get('units', 'cm/s'),
+        'units': 'm/s',
         'window_size_seconds': window_size_seconds
     }
+    ds['VELOCITY_SCALE_2'] = xr.DataArray(
+        ds['VELOCITY_SCALE']**2,
+        dims=dims,
+        coords=ds['VELOCITY_SCALE'].coords,
+        attrs={
+            'long_name': 'Squared velocity scale',
+            'description': 'Squared velocity scale for further calculations',
+            'units': 'm^2/s^2'
+        }
+    )
+    ds['VELOCITY_SCALE_2_LOG'] = xr.DataArray(
+        np.log10(ds['VELOCITY_SCALE']**2),
+        dims=dims,
+        coords=ds['VELOCITY_SCALE'].coords,
+        attrs={
+            'long_name': 'Log10 of squared velocity scale',
+            'description': 'Logarithm of the squared velocity scale for better visualization',
+            'units': 'log10(m^2/s^2)'
+        }
+    )
 
     return ds
 
@@ -388,7 +408,7 @@ def LEM_dissipation(ds, c=0.37):
         raise ValueError("Dataset must contain 'ADIABATIC_N2' and 'VELOCITY_SCALE' variables.")
 
     # Compute dissipation
-    velocity_scale = ds['VELOCITY_SCALE'] / 100 # convert cm/s to m/s
+    velocity_scale = ds['VELOCITY_SCALE']
     N = ds['ADIABATIC_N2'] ** 0.5
     dissipation = c * N * (velocity_scale ** 2)
     dissipation_log = np.log10(dissipation)
@@ -540,7 +560,7 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: 
             profile_depth = ds['DEPTH'].where(profile_mask, drop=True)
 
             # Drop NaNs in both arrays
-            valid = (~np.isnan(profile_values)) & (~np.isnan(profile_depth))
+            valid = (~np.isnan(profile_values)) & (~np.isnan(profile_depth)) & (profile_values > 1e-10)
             if valid.sum() < 2:
                 integral_values.append(np.nan)
                 continue

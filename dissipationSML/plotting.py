@@ -322,11 +322,11 @@ colormaps = {
     'VELOCITY_SCALE':cmo.delta,
 }
 
-def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, end_date=None, add_MLD=None):
+
+def plot_section(ds, vars = ['PSAL','TEMP','DENSITY'], x_var='TIME', depth_var='DEPTH', start=None, end=None, add_MLD=None):
     """
     Plots a section of the dataset with TIME on the x-axis, DEPTH on the y-axis, with color representing the variable value.
-    Any number of variables can be plotted in subplots. If plot_MLD is set to True, the MLD will be plotted inside the density plot or if no density plot is available, 
-    it will be plotted in the first subplot.
+    Any number of variables can be plotted in subplots. If add_MLD is provided, it will plot the Mixed Layer Depth (MLD) on the first subplot or inside the density plot if available.
     
     Parameters
     ----------
@@ -334,14 +334,16 @@ def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, 
         Xarray dataset in OG1 format with at least TIME, DEPTH, and the variables in vars.
     vars: list
         List of variable names to plot against TIME.
-    time_var: str
-        Name of the time variable in the dataset. Default is 'TIME'.
+    x_var: str
+        Name of the variable to use for the x-axis. Default is 'TIME'. Other option is 'PROFILE_NUMBER'.
     depth_var: str
         Name of the depth variable in the dataset. Default is 'DEPTH'.
-    start_date: str or datetime.datetime or numpy.datetime64
-        Start date for the x-axis. Default is None. If str, it should be in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
-    end_date: str or datetime.datetime or numpy.datetime64
-        End date for the x-axis. Default is None. If str, it should be in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    start: str (datetime.datetime or numpy.datetime64) or int
+        Start of the x-Axis. If x_var is 'PROFILE_NUMBER', this should be an integer representing the first profile number. 
+        If x_var is 'TIME', it should be a string in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    end: str (datetime.datetime or numpy.datetime64) or int
+        End of the x-Axis. If x_var is 'PROFILE_NUMBER', this should be an integer representing the last profile number. 
+        If x_var is 'TIME', it should be a string in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
     add_MLD: pd.DataFrame
         MLD as a pandas Dataframe, which is the result of the MLD calculation compute_mld(). The dataframe should contain the profile number, MLD and the mean time profile.
 
@@ -352,70 +354,103 @@ def plot_section(ds, vars, time_var='TIME', depth_var='DEPTH', start_date=None, 
     ax: list of matplotlib.axes.Axes
         The axis objects containing the subplots.
     """
-    ### cut the dataset to the time range
-    dim = list(ds.dims.keys())[0]
-    if start_date is not None or end_date is not None:
-        mask = (ds.TIME >= np.datetime64(start_date)) & (ds.TIME <= np.datetime64(end_date))
+    if start is not None or end is not None:
+        if x_var == 'PROFILE_NUMBER':
+            if isinstance(start, str) or isinstance(end, str):
+                print('Warning: start/end should be integers when x_var is "PROFILE_NUMBER".')
+            mask = (ds.PROFILE_NUMBER >= start) & (ds.PROFILE_NUMBER <= end)
+        elif x_var == 'TIME':
+            if isinstance(start, int) or isinstance(end, int):
+                print('Warning: start/end should be datetime strings when x_var is "TIME".')
+            mask = (ds.TIME >= np.datetime64(start)) & (ds.TIME <= np.datetime64(end))
+        else:
+            print('Warning: x_var must be "TIME" or "PROFILE_NUMBER". Defaulting to "TIME".')
+            x_var = 'TIME'
+            mask = (ds.TIME >= np.datetime64(start)) & (ds.TIME <= np.datetime64(end))
+        
+        dim = list(ds.dims.keys())[0]
         if dim == 'N_MEASUREMENTS':
             ds = ds.sel(N_MEASUREMENTS=mask)
         elif dim == 'TIME':
             ds = ds.sel(TIME=mask)
         else:
             raise ValueError(f"Unsupported dimension '{dim}' for time selection. Expected 'N_MEASUREMENTS' or 'TIME'.")
+
         if add_MLD is not None:
-            add_MLD = add_MLD[(add_MLD['TIME'] >= start_date) & (add_MLD['TIME'] <= end_date)]
+            if x_var == 'PROFILE_NUMBER':
+                add_MLD = add_MLD[(add_MLD['PROFILE_NUMBER'] >= start) & (add_MLD['PROFILE_NUMBER'] <= end)]
+            else:
+                add_MLD = add_MLD[(add_MLD['TIME'] >= start) & (add_MLD['TIME'] <= end)]
 
     num_vars = len(vars)
     fig, ax = plt.subplots(num_vars, 1, figsize=(20, 5 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
     if num_vars == 1:
-        ax = [ax]  # Ensure ax is iterable for a single subplot
+        ax = [ax]
 
-    time = mdates.date2num(ds[time_var].values)
+    # Extract x-axis data
+    x_data = ds[x_var].values
+    if x_var == 'TIME':
+        x_plot = mdates.date2num(x_data)
+    else:
+        x_plot = x_data
 
-    # Check if any variable uses the 'dense' colormap
     has_density_plot = any(colormaps.get(var) == cmo.dense for var in vars)
-
+    s = 5
     for i, var in enumerate(vars):
         if var not in ds:
-            raise ValueError(f'Variable "{var}" not found in dataset')
+            raise ValueError(f'Variable "{var}" not found in dataset.')
 
         values = ds[var].values
         depth = ds[depth_var].values
         mask = np.isnan(values) | np.isnan(depth)
 
         cmap = colormaps.get(var, cmo.delta)
-        ### check if positive and negative values are present, then center the colormap around 0
         if cmap == cmo.delta and np.any(values < 0) and np.any(values > 0):
             norm = mcolors.TwoSlopeNorm(vmin=np.nanpercentile(values, 0.5), vcenter=0, vmax=np.nanpercentile(values, 99.5))
             scatter = ax[i].scatter(
-                time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
-                norm=norm
+                x_plot[~mask], depth[~mask], c=values[~mask], s=s, cmap=cmap, norm=norm
             )
         else:
             scatter = ax[i].scatter(
-                time[~mask], depth[~mask], c=values[~mask], s=20, cmap=cmap,
+                x_plot[~mask], depth[~mask], c=values[~mask], s=s, cmap=cmap,
                 vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
             )
 
-        # Plot MLD if provided
         if add_MLD is not None:
             if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
-                ax[i].plot(add_MLD['TIME'], add_MLD['MLD'], color='black', marker='o', linewidth=1, label='Mixed Layer Depth', markersize=2)
-                #ax[i].scatter(MLD_times, MLD_values, color='black', s=20, marker='x')
+                ax[i].plot(add_MLD[x_var], add_MLD['MLD'], color='black', marker='o', linewidth=1,
+                           label='Mixed Layer Depth', markersize=2)
                 ax[i].legend(loc='upper left', fontsize=8)
+        unit = getattr(ds[var], 'units', '')
+        long_name = getattr(ds[var], 'long_name', var)
 
         ax[i].invert_yaxis()
         ax[i].set_ylabel('Depth (m)')
         ax[i].grid()
-        ax[i].set_title(var)
-        ax[i].set_xlim(left=time[0]-1, right=time[-1]+1)
+        ax[i].set_title(var + ' - ' + long_name)
+
+        # Auto range with margin
+        delta = x_plot[-1] - x_plot[0]
+        if x_var == 'TIME':
+            ax[i].set_xlim(x_plot[0] - delta / 50, x_plot[-1] + delta / 50)
+        else:
+            ax[i].set_xlim(np.min(x_plot) - delta / 50, np.max(x_plot) + delta / 50)
 
         cbar = plt.colorbar(scatter, ax=ax[i], pad=0.03)
-        cbar.set_label(var, labelpad=20, rotation=270)
+        cbar.set_label(var + ' [' + unit + ']', labelpad=20, rotation=270)
 
-    ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-    ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    plt.xticks(rotation=45)
+    # Time axis formatting
+    if x_var == 'TIME':
+        ax[-1].xaxis.set_major_locator(mdates.AutoDateLocator())
+        #ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        if delta < 2:
+            ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d%H:%M'))
+        else:
+            ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        plt.xticks(rotation=45)
+    else:
+        ax[-1].set_xlabel('Profile Number')
+
     plt.tight_layout()
     plt.show()
 
@@ -875,5 +910,5 @@ def plot_var_from_mld(mld_ds, var, years, rolling_str='12h'):
     cbar.set_ticklabels(sorted_unique_missions)
     cbar.set_label('Mission (Glider/MissionDate)', fontsize=14)
 
-    return fig
+    return fig, axes
 
