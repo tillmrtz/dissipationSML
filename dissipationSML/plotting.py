@@ -11,8 +11,12 @@ import matplotlib.colors as mcolors
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import os
-from dissipationSML import tools
+from dissipationSML import tools, utilities
+import importlib
+importlib.reload(tools)
+importlib.reload(utilities)
 import matplotlib.cm as cm
+from scipy.interpolate import interp1d
 
 
 import regionmask as rm
@@ -151,7 +155,7 @@ def plot_glider_track(ds: xr.Dataset, mean_profile = False, ax: plt.Axes = None,
 
     return fig, ax
 
-def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','SIGMA_T'], use_bins: bool = False, binning: float = 2,ax1 = None) -> tuple:
+def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','SIGMA_T'], use_bins: bool = False, binning: float = 2,ax = None) -> tuple:
     """
     Plots binned temperature, salinity, and density against depth on a single plot with three x-axes.
 
@@ -183,7 +187,7 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
     vars = [v for v in vars if v] 
     # If vars is empty, show an empty plot
     if not vars:
-        if ax1 is None:  
+        if ax is None:  
             fig, ax1 = plt.subplots(figsize=(12, 9))
             force_plot = True
         else:
@@ -199,41 +203,40 @@ def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','
         raise ValueError("Only three variables can be plotted at once, chose less variables")
     
     with plt.style.context(plotting_style):
-        if ax1 is None:  
-            fig, ax1 = plt.subplots(figsize=(12, 9))
+        if ax is None:  
+            fig, ax1 = plt.subplots(figsize=(12, 9))   
             force_plot = True
         else:
             fig = plt.gcf()
             force_plot = False
+            ax1 = ax  # Use the first axis if provided
 
         profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
         if use_bins:
-            profile = tools.bin_profile(profile, vars, binning)
+            profile = utilities.bin_profile(profile, vars, binning)
 
         # Plot binned data
         mission = ds.id.split('_')[1][0:8]
         glider = ds.id.split('_')[0]
 
-        s=10+binning
-
         axs = [ax1, ax1.twiny(), ax1.twiny()]
         colors = ['red', 'blue', 'grey']
+        s = 10 + binning
+
         for i, var in enumerate(vars):
             ax = axs[i]
-            ### add the long_name to the label, if it exists
-            long_name = getattr(profile[var], 'long_name', '')
-            ax.plot(profile[var], profile['DEPTH'], color=colors[i], label=f'{var} - {long_name}', ls='-')
-            ax.scatter(profile[var], profile['DEPTH'], color=colors[i], marker='o',s=s)
-            unit = getattr(profile[var], 'units', '')
-            ax.set_xlabel(f'{var} [{unit}]', color=colors[i])
-            ax.tick_params(axis='x', colors=colors[i], bottom=True, top=False, labelbottom=True, labeltop=False)
+            unit = utilities.get_unit(ds, var)
+            label = utilities.get_label(var)
+            ax.plot(profile[var], profile['DEPTH'], color=colors[i], label=label)
+            ax.scatter(profile[var], profile['DEPTH'], color=colors[i], marker='o', s=s)
+            ax.set_xlabel(f'{label} [{unit}]', color=colors[i])
+            ax.tick_params(axis='x', colors=colors[i])
+            ax.spines['top'].set_visible(False)
             if i > 0:
                 ax.xaxis.set_ticks_position('bottom')
-                ax.spines['top'].set_visible(False)
                 ax.spines['bottom'].set_position(('axes', -0.09*i))
             ax.xaxis.set_label_coords(0.5, -0.05-0.105*i)
 
-        fig.legend(loc='upper right',fontsize=10)
         # Set pressure as y-axis (Increasing Downward)
         ax1.grid(True)
         ax1.set_ylabel('Depth (m)')
@@ -274,7 +277,7 @@ def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: f
     profile = ds.where(ds.PROFILE_NUMBER == profile_num, drop=True)
 
     if use_bins:
-        profile = tools.bin_profile(profile, vars, binning)
+        profile = utilities.bin_profile(profile, vars, binning)
 
     CR_df = tools.calculate_CR_for_all_depth(profile)
 
@@ -296,164 +299,249 @@ def plot_CR(ds: xr.Dataset, profile_num: int, use_bins: bool = False, binning: f
         ax.set_title(f'Profile {profile_num} (Convective Resistance)')
         ax.grid(True)
         ax.legend()
-        plt.show()
     
     return fig, ax
 
-colormaps = {
-    'PSAL': cmo.haline,
-    'PSAL_RAW': cmo.haline,
-    'TEMP': cmo.thermal,
-    'TEMP_RAW': cmo.thermal,
-    'THETA': cmo.thermal,
-    'SIGMA_T': cmo.dense,
-    'SIGMA_T_RAW': cmo.dense,
-    'SIGMA_1': cmo.dense,
-    'SIGMA_1_RAW': cmo.dense,
-    'SIGTHETA': cmo.dense,
-    'SIGTHETA_RAW': cmo.dense,
-    'PRES': cmo.deep,
-    'ADIABATIC_N2': cmo.dense,
-    #'UNSORTED_N2': cmo.dense,
-    'GLIDER_VERT_VELO_MODEL': cmo.delta,
-    'GLIDER_HORZ_VELO_MODEL': cmo.delta,
-    'GLIDE_SPEED': cmo.delta,
-    'VERTICAL_WATER_VELOCITY': cmo.delta,
-    'VELOCITY_SCALE':cmo.delta,
-}
-
-
-def plot_section(ds, vars = ['PSAL','TEMP','DENSITY'], x_var='TIME', depth_var='DEPTH', start=None, end=None, add_MLD=None):
+def plot_scatter(ds, vars=['PSAL', 'TEMP', 'DENSITY'], start=None, end=None, mld_df=None):
     """
-    Plots a section of the dataset with TIME on the x-axis, DEPTH on the y-axis, with color representing the variable value.
-    Any number of variables can be plotted in subplots. If add_MLD is provided, it will plot the Mixed Layer Depth (MLD) on the first subplot or inside the density plot if available.
-    
+    Plots scatter plots of the dataset with TIME on the x-axis and DEPTH on the y-axis.
+    Colors indicate variable values. Optionally overlays Mixed Layer Depth (MLD) data.
+
     Parameters
     ----------
-    ds: xarray.Dataset
-        Xarray dataset in OG1 format with at least TIME, DEPTH, and the variables in vars.
-    vars: list
-        List of variable names to plot against TIME.
-    x_var: str
-        Name of the variable to use for the x-axis. Default is 'TIME'. Other option is 'PROFILE_NUMBER'.
-    depth_var: str
-        Name of the depth variable in the dataset. Default is 'DEPTH'.
-    start: str (datetime.datetime or numpy.datetime64) or int
-        Start of the x-Axis. If x_var is 'PROFILE_NUMBER', this should be an integer representing the first profile number. 
-        If x_var is 'TIME', it should be a string in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
-    end: str (datetime.datetime or numpy.datetime64) or int
-        End of the x-Axis. If x_var is 'PROFILE_NUMBER', this should be an integer representing the last profile number. 
-        If x_var is 'TIME', it should be a string in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
-    add_MLD: pd.DataFrame
-        MLD as a pandas Dataframe, which is the result of the MLD calculation compute_mld(). The dataframe should contain the profile number, MLD and the mean time profile.
+    ds : xarray.Dataset
+        Dataset with at least 'TIME', 'DEPTH', and the requested variables.
+    vars : list of str
+        Variables to plot.
+    start : str
+        Start time in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    end : str
+        End time in 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS' format.
+    mld_df : pandas.DataFrame, optional
+        DataFrame containing MLD values with 'TIME' and 'MLD' columns.
 
     Returns
     -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    ax: list of matplotlib.axes.Axes
-        The axis objects containing the subplots.
+    fig : matplotlib.figure.Figure
+    ax : list of matplotlib.axes._subplots.AxesSubplot
     """
+
     if start is not None or end is not None:
-        if x_var == 'PROFILE_NUMBER':
-            if isinstance(start, str) or isinstance(end, str):
-                print('Warning: start/end should be integers when x_var is "PROFILE_NUMBER".')
-            mask = (ds.PROFILE_NUMBER >= start) & (ds.PROFILE_NUMBER <= end)
-        elif x_var == 'TIME':
-            if isinstance(start, int) or isinstance(end, int):
-                print('Warning: start/end should be datetime strings when x_var is "TIME".')
-            mask = (ds.TIME >= np.datetime64(start)) & (ds.TIME <= np.datetime64(end))
-        else:
-            print('Warning: x_var must be "TIME" or "PROFILE_NUMBER". Defaulting to "TIME".')
-            x_var = 'TIME'
-            mask = (ds.TIME >= np.datetime64(start)) & (ds.TIME <= np.datetime64(end))
+        if start is None:
+            start = ds.TIME.min().values
+        if end is None:
+            end = ds.TIME.max().values
+        
+        mask = (ds.TIME >= np.datetime64(start)) & (ds.TIME <= np.datetime64(end))
         
         dim = list(ds.dims.keys())[0]
         if dim == 'N_MEASUREMENTS':
             ds = ds.sel(N_MEASUREMENTS=mask)
         elif dim == 'TIME':
             ds = ds.sel(TIME=mask)
-        else:
-            raise ValueError(f"Unsupported dimension '{dim}' for time selection. Expected 'N_MEASUREMENTS' or 'TIME'.")
-
-        if add_MLD is not None:
-            if x_var == 'PROFILE_NUMBER':
-                add_MLD = add_MLD[(add_MLD['PROFILE_NUMBER'] >= start) & (add_MLD['PROFILE_NUMBER'] <= end)]
-            else:
-                add_MLD = add_MLD[(add_MLD['TIME'] >= start) & (add_MLD['TIME'] <= end)]
+        
+        if mld_df is not None:
+            mld_df = mld_df[(mld_df['PROFILE_NUMBER'] >= start) & (mld_df['PROFILE_NUMBER'] <= end)]
 
     num_vars = len(vars)
-    fig, ax = plt.subplots(num_vars, 1, figsize=(20, 5 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
+    fig, ax = plt.subplots(num_vars, 1, figsize=(20, 7 * num_vars), sharex=True,
+                           gridspec_kw={'height_ratios': [8] * num_vars})
     if num_vars == 1:
         ax = [ax]
 
-    # Extract x-axis data
-    x_data = ds[x_var].values
-    if x_var == 'TIME':
-        x_plot = mdates.date2num(x_data)
-    else:
-        x_plot = x_data
-
-    has_density_plot = any(colormaps.get(var) == cmo.dense for var in vars)
+    x_data = mdates.date2num(ds.TIME.values)
+    depth = ds['DEPTH'].values
+    has_density = any(utilities.get_colormap(var) == cmo.dense for var in vars)
     s = 5
+
     for i, var in enumerate(vars):
         if var not in ds:
             raise ValueError(f'Variable "{var}" not found in dataset.')
 
         values = ds[var].values
-        depth = ds[depth_var].values
         mask = np.isnan(values) | np.isnan(depth)
 
-        cmap = colormaps.get(var, cmo.delta)
+        cmap = utilities.get_colormap(var)
         if cmap == cmo.delta and np.any(values < 0) and np.any(values > 0):
             norm = mcolors.TwoSlopeNorm(vmin=np.nanpercentile(values, 0.5), vcenter=0, vmax=np.nanpercentile(values, 99.5))
-            scatter = ax[i].scatter(
-                x_plot[~mask], depth[~mask], c=values[~mask], s=s, cmap=cmap, norm=norm
-            )
         else:
-            scatter = ax[i].scatter(
-                x_plot[~mask], depth[~mask], c=values[~mask], s=s, cmap=cmap,
-                vmin=np.nanpercentile(values, 0.5), vmax=np.nanpercentile(values, 99.5)
-            )
+            norm = None
 
-        if add_MLD is not None:
-            if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
-                ax[i].plot(add_MLD[x_var], add_MLD['MLD'], color='black', marker='o', linewidth=1,
-                           label='Mixed Layer Depth', markersize=2)
-                ax[i].legend(loc='upper left', fontsize=8)
-        unit = getattr(ds[var], 'units', '')
-        long_name = getattr(ds[var], 'long_name', var)
+        scatter = ax[i].scatter(
+            x_data[~mask], depth[~mask], c=values[~mask], s=s, cmap=cmap, norm=norm,
+            vmin=None if norm else np.nanpercentile(values, 0.5),
+            vmax=None if norm else np.nanpercentile(values, 99.5)
+        )
+
+        if mld_df is not None and (has_density and cmap == cmo.dense or not has_density and i == 0):
+            ax[i].plot(mdates.date2num(mld_df['TIME']), mld_df['MLD'], 'ko-', linewidth=1, markersize=2, label='MLD')
+            ax[i].legend(loc='upper left', fontsize=8)
+
+        unit = utilities.get_unit(ds, var)
+        label = utilities.get_label(var)
 
         ax[i].invert_yaxis()
         ax[i].set_ylabel('Depth (m)')
         ax[i].grid()
-        ax[i].set_title(var + ' - ' + long_name)
-
-        # Auto range with margin
-        delta = x_plot[-1] - x_plot[0]
-        if x_var == 'TIME':
-            ax[i].set_xlim(x_plot[0] - delta / 50, x_plot[-1] + delta / 50)
-        else:
-            ax[i].set_xlim(np.min(x_plot) - delta / 50, np.max(x_plot) + delta / 50)
+        ax[i].set_title(f'Scatter plot of {label}')
 
         cbar = plt.colorbar(scatter, ax=ax[i], pad=0.03)
-        cbar.set_label(var + ' [' + unit + ']', labelpad=20, rotation=270)
+        cbar.set_label(f'{label} [{unit}]', labelpad=20, rotation=270)
 
-    # Time axis formatting
-    if x_var == 'TIME':
-        ax[-1].xaxis.set_major_locator(mdates.AutoDateLocator())
-        #ax[-1].xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-        if delta < 2:
-            ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d%H:%M'))
-        else:
-            ax[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        plt.xticks(rotation=45)
-    else:
-        ax[-1].set_xlabel('Profile Number')
+    ax[-1].xaxis.set_major_locator(mdates.AutoDateLocator())
+    delta = x_data[-1] - x_data[0] if len(x_data) > 1 else 1
+    date_format = '%Y-%m-%d%H:%M' if delta < 2 else '%Y-%m-%d'
+    ax[-1].xaxis.set_major_formatter(mdates.DateFormatter(date_format))
+    plt.xticks(rotation=45)
+    ax[-1].set_xlabel('Time')
 
     plt.tight_layout()
     plt.show()
 
+    return fig, ax
+
+def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=None, mld_df = None):
+    """
+    Plots a section of the dataset with PROFILE_NUMBER on the x-axis, DEPTH on the y-axis,
+    and mean TIME per profile as secondary x-axis (automatically spaced).
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset with at least PROFILE_NUMBER, TIME, DEPTH, and target variables.
+    vars : str or list of str
+        Variables to visualize. If a single variable is provided, it will be converted to a list.
+    v_res : float
+        Vertical resolution (DEPTH binning).
+    start : int or None
+        Start PROFILE_NUMBER (inclusive).
+    end : int or None
+        End PROFILE_NUMBER (inclusive).
+    mld_df : pd.DataFrame
+        MLD as a pandas Dataframe, which is the result of the MLD calculation compute_mld(). The dataframe should contain the profile number, MLD and the mean time profile.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    ax : list of matplotlib.axes.Axes
+
+    Notes
+    -----
+    Original Author: Till Moritz
+    """
+    if not isinstance(vars, list):
+        vars = [vars]
+
+    if start is not None or end is not None:
+        if start is None:
+            start = ds.PROFILE_NUMBER.min().values
+        if end is None:
+            end = ds.PROFILE_NUMBER.max().values
+        
+        mask = (ds.PROFILE_NUMBER >= start) & (ds.PROFILE_NUMBER <= end)
+        
+        dim = list(ds.dims.keys())[0]
+        if dim == 'N_MEASUREMENTS':
+            ds = ds.sel(N_MEASUREMENTS=mask)
+        elif dim == 'TIME':
+            ds = ds.sel(TIME=mask)
+        
+        if mld_df is not None:
+            mld_df = mld_df[(mld_df['PROFILE_NUMBER'] >= start) & (mld_df['PROFILE_NUMBER'] <= end)]
+
+    num_vars = len(vars)
+    fig, ax = plt.subplots(num_vars, 1, figsize=(20, 7 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
+    if num_vars == 1:
+        ax = [ax]
+
+    x_plot = ds['PROFILE_NUMBER'].values
+
+    has_density_plot = any(utilities.get_colormap(var) == cmo.dense for var in vars)
+
+    # Compute mean time per profile
+    df_time = ds[['TIME', 'PROFILE_NUMBER']].to_dataframe().dropna()
+    if df_time.index.name == 'TIME':
+        df_time = df_time.reset_index()
+    mean_times = df_time.groupby('PROFILE_NUMBER')['TIME'].mean()
+
+    for i, var in enumerate(vars):
+        if var not in ds:
+            raise ValueError(f'Variable "{var}" not found in dataset.')
+
+        values = ds[var].values
+        depth = ds['DEPTH'].values
+
+        p = 1
+        z = v_res
+
+        varG, profG, depthG = utilities.construct_2dgrid(x_plot, depth, values, p, z, x_bin_center=False)
+
+        cmap = utilities.get_colormap(var)
+        if cmap == cmo.delta and np.any(values < 0) and np.any(values > 0):
+            norm = mcolors.TwoSlopeNorm(
+                vmin=np.nanpercentile(values, 0.5),
+                vcenter=0,
+                vmax=np.nanpercentile(values, 99.5)
+            )
+            im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, norm=norm)
+        else:
+            im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap,
+                                  vmin=np.nanpercentile(values, 0.5),
+                                  vmax=np.nanpercentile(values, 99.5))
+        if mld_df is not None:
+            if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
+                ax[i].plot(mld_df['PROFILE_NUMBER'], mld_df['MLD'], color='black', marker='o', linewidth=1,
+                           label='Mixed Layer Depth', markersize=2)
+                ax[i].legend(loc='upper left', fontsize=8)
+
+        unit = utilities.get_unit(ds, var)
+        label = utilities.get_label(var)
+
+        total_profiles = x_plot[-1] - x_plot[0]
+        ax[i].invert_yaxis()
+        ax[i].set_ylabel('Depth (m)')
+        ax[i].grid(True)
+        ax[i].set_title(f'Section plot of {label}')
+        ax[i].set_xlim(np.min(x_plot)-total_profiles/50, np.max(x_plot)+total_profiles/50)
+
+        cbar = plt.colorbar(im, ax=ax[i], pad=0.03)
+        cbar.set_label(f'{label} [{unit}]', labelpad=20, rotation=270)
+
+    # Main x-axis: profile numbers
+    ax[-1].set_xlabel('Profile Number')
+
+    # Get mean time per profile (datetime) and profile numbers
+    times = pd.to_datetime(mean_times)
+    profiles = mean_times.index.values
+    time_nums = mdates.date2num(times)  # matplotlib float format for dates
+
+    # Build interpolators
+    to_time = interp1d(profiles, time_nums, bounds_error=False, fill_value="extrapolate")
+    to_profile = interp1d(time_nums, profiles, bounds_error=False, fill_value="extrapolate")
+
+    # Create a transform that maps profile numbers → time for the secondary x-axis
+    def forward(x):
+        return to_time(x)
+
+    def inverse(x):
+        return to_profile(x)
+
+    # Create the secondary axis (top), linked to the bottom profile axis
+    time_ax = ax[-1].secondary_xaxis("bottom", functions=(forward, inverse))
+    time_ax.set_xlabel("Mean Time per Profile")
+    time_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    time_delta = time_nums[-1] - time_nums[0]
+    if time_delta < 5:
+        time_ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+    else:
+        time_ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    
+    time_ax.spines['bottom'].set_position(('outward', 40))
+    time_ax.tick_params(rotation=35)
+    
+    plt.tight_layout()
+    plt.show()
+    
     return fig, ax
 
 def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
@@ -526,8 +614,8 @@ def plot_time_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
         time = profile.TIME.values.astype('float64')
         time_diff = np.diff(time) * 1e-9
         ### take out all time_diff values that are larger than 30 seconds and print them
-        print('Time differences larger than 30 seconds:', time_diff[time_diff >= 31] , 'at depths:', (depth[1:][time_diff >= 31]+depth[:-1][time_diff >= 31])/2)
-        time_diff = time_diff[time_diff <= 31]
+        print('Time differences larger than 90 seconds:', time_diff[time_diff >= 91] , 'at depths:', (depth[1:][time_diff >= 91]+depth[:-1][time_diff >= 91])/2)
+        time_diff = time_diff[time_diff <= 91]
         # Plot histogram of time differences
         ax.hist(time_diff, bins=20, color='blue', alpha=0.7)
         ax.set_xlabel('Time Difference (s)')
@@ -637,82 +725,6 @@ def plot_IFR_region_on_map(IFR_region: rm.Regions):
 
     return fig, ax
 
-def interactive_region_selector(default_coords):
-    """
-    Creates an interactive widget with four coordinate sliders (longitude & latitude)
-    for defining a rectangular region. The region is only returned when the "Confirm Selection" button is clicked.
-
-    Parameters
-    ----------
-    default_coords : list
-        A list containing four pairs of default longitude and latitude values.
-
-    Returns
-    -------
-    function
-        A function `get_region()` that returns the selected `rm.Regions` object after confirmation.
-    """
-    
-    def create_coord_sliders(default_long, default_lat):
-        lat_slider = widgets.FloatSlider(description="Latitude", value=default_lat, min=58, max=67, orientation="vertical")
-        long_slider = widgets.FloatSlider(description="Longitude", value=default_long, min=-16, max=-6)
-        return widgets.VBox([lat_slider, long_slider])
-
-    # Create a tab widget
-    tab = widgets.Tab()
-    coordinates = [create_coord_sliders(lon, lat) for lon, lat in default_coords]
-    tab.children = coordinates
-
-    # Set tab titles
-    titles = ['First corner', 'Second corner', 'Third corner', 'Fourth corner']
-    for i in range(4):
-        tab.set_title(i, titles[i])
-
-    # Output widget for the plot
-    output = widgets.Output()
-
-    # Region storage (updated only on confirmation)
-    selected_region = {'region': None}
-
-    # Function to update the plot
-    def plot_rectangle():
-        with output:
-            clear_output(wait=True)  # Clear previous plot to prevent overlapping
-            coords = np.array([[tab.children[i].children[1].value, 
-                                tab.children[i].children[0].value] for i in range(4)])
-            region = rm.Regions([coords], names=['IFR'])
-
-            fig, ax = plot_IFR_region_on_map(region)
-            display(fig)
-            del fig, ax
-
-    # Function to store the confirmed region
-    def confirm_selection(b):
-        coords = np.array([[tab.children[i].children[1].value, 
-                            tab.children[i].children[0].value] for i in range(4)])
-        selected_region['region'] = rm.Regions([coords], names=['IFR'])
-        print("Region confirmed!")
-
-    # Confirmation button
-    confirm_button = widgets.Button(description="Confirm Selection")
-    confirm_button.on_click(confirm_selection)
-
-    # Attach event listeners to sliders for real-time plotting
-    for i in range(4):
-        for slider in tab.children[i].children:
-            slider.observe(lambda change: plot_rectangle(), names='value')
-
-    # Function to return the confirmed `rm.Regions` object
-    def get_region():
-        return selected_region['region']
-
-    # Display widgets and plot
-    display(tab, confirm_button, output)
-    plot_rectangle()
-    
-    return get_region
-
-
 def plot_dive_depth(ds, dive_number):
     """
     This function plots the depth of one dive against time.
@@ -749,166 +761,288 @@ def plot_dive_depth(ds, dive_number):
         ax.grid(True)
     return fig, ax
 
-def plot_winds_at_time(ds, time):
+def plot_var_from_mld(mld_ds, vars, years=None, rolling_str='12h', plot_type='both', mission_cbar=True):
     """
-    Plots wind vectors (u10, v10) at a specific time on a map.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing the wind variables ('u10' and 'v10').
-    time : str or pandas.Timestamp
-        The time point for which wind data should be plotted.
-    
-    Returns
-    -------
-    fig, ax : matplotlib figure and axis
-        The wind quiver plot.
-    """
-    # Select data for the specified time
-    ds_at_time = ds.sel(valid_time=time)
-
-    # Extract wind components
-    u = ds_at_time['u10'].values
-    v = ds_at_time['v10'].values
-
-    # Extract coordinates
-    latitudes = ds['latitude'].values
-    longitudes = ds['longitude'].values
-
-    # Ensure data is 2D (reshape if necessary)
-    if u.ndim == 1:
-        lat_size = len(latitudes)
-        lon_size = len(longitudes)
-        u = u.reshape(lat_size, lon_size)
-        v = v.reshape(lat_size, lon_size)
-
-    # Create a meshgrid for quiver plotting
-    lon_grid, lat_grid = np.meshgrid(longitudes, latitudes)
-
-    fig, ax = plt.subplots(figsize=(12, 6), subplot_kw={'projection': ccrs.PlateCarree()})
-
-    # Define map extent
-    ax.set_extent([longitudes.min()-1, longitudes.max()+1, latitudes.min()-1, latitudes.max()+1], crs=ccrs.PlateCarree())
-
-    # Add map features
-    ax.add_feature(cfeature.LAND, edgecolor='black')
-    ax.add_feature(cfeature.COASTLINE)
-    ax.add_feature(cfeature.BORDERS, linestyle=":")
-
-    # Downsample to avoid overcrowding
-    step = 1  # Adjust for more/fewer arrows
-    ax.quiver(
-        lon_grid[::step, ::step], lat_grid[::step, ::step], 
-        u[::step, ::step], v[::step, ::step], 
-        transform=ccrs.PlateCarree(), scale=1000
-    )
-
-    ax.set_title(f"Wind Vectors at {time}")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-
-    # Gridlines
-    gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
-    gl.top_labels = False
-    gl.right_labels = False
-
-    plt.show()
-    return fig, ax
-
-def plot_var_from_mld(mld_ds, var, years, rolling_str='12h'):
-    """
-    Plot one variable from the MLD dataset(s), colored by glider mission, for all specified years.
+    Plot one or more variables from MLD dataset(s), colored by glider mission.
 
     Parameters
     ----------
     mld_ds : xarray.Dataset or list of xarray.Dataset
-        MLD dataset(s) containing the variable to plot. If a list, each entry is treated as a unique mission.
-    var : str
-        The variable name to plot.
-    years : list of int
-        The years to plot.
+        MLD dataset(s) containing the variable(s) to plot. If a list, each entry is treated as a unique mission.
+    var : str or list of str
+        The variable(s) name(s) to plot.
+    years : list of int or None
+        The years to plot. If None, plot the entire time range as a single plot.
     rolling_str : str
         The rolling mean window string (e.g., '12h' for 12 hours).
+    plot_type : str
+        What to plot: "both" (default), "scatter", or "rolling".
+    mission_cbar : bool
+        Whether to display the mission colorbar (default is True).
 
     Returns
     -------
     fig : matplotlib.figure.Figure
         The figure object containing the plots.
     """
-    if not isinstance(mld_ds, list):
-        mld_ds = [mld_ds]
 
-    # Collect all unique missions
-    all_missions = []
-    for ds in mld_ds:
-        all_missions.extend(np.unique(ds['GLIDER_MISSION'].values))
-    sorted_unique_missions = sorted(set(all_missions), key=lambda x: x.split('/')[1])
-    mission_to_int = {mission: i for i, mission in enumerate(sorted_unique_missions)}
+    if plot_type not in {'both', 'scatter', 'rolling'}:
+        raise ValueError("plot_type must be 'both', 'scatter', or 'rolling'.")
 
-    # Set up colormap
-    cmap = cm.get_cmap('tab20', len(sorted_unique_missions))
-    norm = mcolors.Normalize(vmin=0, vmax=len(sorted_unique_missions) - 1)
+    def get_mission_label(ds):
+        glider_id = ds['GLIDER'].values[0]
+        mission_id = ds['MISSION'].values[0]
+        return f"{glider_id}/{mission_id}"
 
-    fig, axes = plt.subplots(len(years), 1, figsize=(25, 6 * len(years) + 4), sharex=False, sharey=True)
-    if len(years) == 1:
-        axes = [axes]
+    # Normalize inputs
+    mld_ds = [mld_ds] if not isinstance(mld_ds, list) else mld_ds
+    var_list = [vars] if isinstance(vars, str) else vars
+    if years is not None and not isinstance(years, list):
+        years = [years]
 
-    for i, year in enumerate(years):
-        ax = axes[i]
+    # Mission color mapping
+    all_mission_labels = [get_mission_label(ds) for ds in mld_ds]
+    unique_missions = sorted(set(all_mission_labels), key=lambda x: x.split('/')[1])
+    mission_to_color_index = {label: i for i, label in enumerate(unique_missions)}
+    cmap = cm.get_cmap('tab20', len(unique_missions))
+    norm = mcolors.Normalize(vmin=0, vmax=len(unique_missions) - 1)
 
-        for ds in mld_ds:
-            ds = ds.sortby('TIME')  # Ensure time is sorted
+    # Determine number of plots
+    num_plots = len(var_list) * (len(years) if years else 1)
 
-            # Mission ID (assumes one unique mission per ds)
-            mission_id = ds['GLIDER_MISSION'].values[0]
-            mission_color = cmap(mission_to_int[mission_id])
+    with plt.style.context(plotting_style):
+        figsize = (25, 8 * num_plots + 2) if mission_cbar == True else (25, 8)
+        fig, axes = plt.subplots(num_plots, 1, figsize=figsize, sharex=False, sharey=False)
+        axes = [axes] if num_plots == 1 else axes
+            
+        plot_idx = 0  # To track subplot index
 
-            # Select year
-            ds_year = ds.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+        time_range = None
+        if years is None:
+            # Determine overall time extent for single-range plot
+            all_times = np.concatenate([ds['TIME'].values for ds in mld_ds])
+            time_range = (all_times.min(), all_times.max())
 
-            if ds_year.TIME.size == 0 or var not in ds_year:
-                continue
+        for year in (years if years else [None]):
+            for var_name in var_list:
+                ax = axes[plot_idx]
+                label = utilities.get_label(var_name)
+                title_str = f'{label} colored by Mission - {year}' if year else f'{label} colored by Mission - Full Range'
+                ax.set_title(title_str, fontsize=20)
 
-            # Rolling mean
-            rolling = ds.resample(TIME=rolling_str).mean(dim='TIME').sortby('TIME')
-            rolling_year = rolling.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+                for ds in mld_ds:
+                    ds = ds.sortby('TIME')
+                    mission_label = get_mission_label(ds)
+                    mission_color = cmap(mission_to_color_index[mission_label])
 
-            # Scatter
-            ax.scatter(
-                ds_year['TIME'].values,
-                ds_year[var].values,
-                c=[mission_color],
-                s=10,
-                label=None
-            )
+                    if var_name not in ds:
+                        continue
 
-            # Rolling line (same color)
-            ax.plot(
-                rolling_year['TIME'].values,
-                rolling_year[var].values,
-                color=mission_color,
-                linewidth=2
-            )
+                    # Filter by year if applicable
+                    ds_filtered = ds
+                    if year is not None:
+                        ds_filtered = ds.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+                        if ds_filtered.TIME.size == 0:
+                            continue
 
-        ax.set_xlim(np.datetime64(f'{year}-01-01'), np.datetime64(f'{year}-12-31'))
-        if var == 'MLD':
-            ax.set_ylim(0, 700)
-            ax.invert_yaxis()
-        ax.set_ylabel(f'{var} [W m kg⁻¹]',fontsize=18)
-        ax.set_title(f'{var} colored by Mission - {year}', fontsize=20)
-        ax.grid(True)
-        ### set ticks size to 18
-        ax.tick_params(axis='both', which='major', labelsize=18)
+                    # Rolling mean
+                    rolling = ds.resample(TIME=rolling_str).mean(dim='TIME').sortby('TIME')
+                    rolling_filtered = rolling
+                    if year is not None:
+                        rolling_filtered = rolling.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
 
-    axes[-1].set_xlabel('Time', fontsize=18)
-    fig.tight_layout(rect=[0, 0, 1, 1])
+                    if plot_type in {'both', 'scatter'}:
+                        ax.scatter(ds_filtered['TIME'].values, ds_filtered[var_name].values, c=[mission_color], s=10, label=None )
+                    if plot_type in {'both', 'rolling'}:
+                        ax.plot(rolling_filtered['TIME'].values, rolling_filtered[var_name].values, color=mission_color, linewidth=2)
 
-    # Shared colorbar
-    cbar = fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes, orientation='horizontal', fraction=0.15, pad=0.1 / len(years))
-    cbar.set_ticks(np.arange(len(sorted_unique_missions)))
-    cbar.set_ticklabels(sorted_unique_missions)
-    cbar.set_label('Mission (Glider/MissionDate)', fontsize=14)
+                # Axis formatting
+                if year is not None:
+                    ax.set_xlim(np.datetime64(f'{year}-01-01'), np.datetime64(f'{year}-12-31'))
+                else:
+                    ax.set_xlim(time_range)
+                if var_name == 'MLD':
+                    ax.set_ylim(0, 700)
+                    ax.invert_yaxis()
+                unit = utilities.get_unit(ds, var_name)
+                ax.set_ylabel(f'{label} [{unit}]', fontsize=20)
+                ax.grid(True)
+                #ax.tick_params(axis='both', which='major', labelsize=18)
+                plot_idx += 1
+
+        # Label only the last subplot’s x-axis
+        axes[-1].set_xlabel('Time', fontsize=18)
+        fig.tight_layout(rect=[0, 0, 1, 1])
+
+        # Shared colorbar
+        if mission_cbar:
+            sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+            cbar = fig.colorbar(sm, ax=axes, orientation='horizontal', fraction=0.15, pad=0.1 / num_plots)
+            cbar.set_ticks(np.arange(len(unique_missions)))
+            cbar.set_ticklabels(unique_missions)
+            cbar.set_label('Mission (Glider/MissionDate)', fontsize=14)
 
     return fig, axes
+
+def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
+    """
+    Scatter plot of dissipation metrics vs epsilon terms, colored by month or another variable.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset with variables: EPSILON_TAU, epsilon_Q, DISSIPATION_LEM_TOTAL, MLD, TIME.
+    rolling_str : str
+        Resample frequency string (e.g., '1d', '6h').
+    color_by : str
+        Variable used to color the points. If 'TIME', colors by month.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The created figure.
+    axs : list of matplotlib.axes.Axes
+        The list of subplot axes.
+    """
+    # Sort and resample
+    ds = ds.sortby('TIME')
+    if rolling_str:
+        ds_rolling = ds.resample(TIME=rolling_str).mean(dim='TIME').sortby('TIME')
+    else:
+        ds_rolling = ds
+
+    # Color setup
+    if color_by == 'TIME':
+        months = ds_rolling.TIME.dt.month
+        cmap = plt.cm.PuOr_r
+        boundaries = np.arange(1, 14)
+        norm = mcolors.BoundaryNorm(boundaries, cmap.N)
+        color_vals = months
+    else:
+        color_vals = ds_rolling[color_by].values
+        cmap = utilities.get_colormap(color_by)
+        norm = None  # Let matplotlib handle it
+
+    var1 = 'DISSIPATION_LEM_TOTAL'
+    var2 = 'EPSILON_TAU'
+    var3 = 'epsilon_Q'
+
+    with plt.style.context(plotting_style):
+    # Set up figure
+        fig, axs = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+
+        # Scatter plots
+        axs[0].scatter(ds_rolling[var2], ds_rolling[var1],
+                    c=color_vals, cmap=cmap, norm=norm, s=5)
+
+        axs[1].scatter(ds_rolling[var3], ds_rolling[var1],
+                    c=color_vals, cmap=cmap, norm=norm, s=5)
+
+        eps_sum = ds_rolling[var2] + ds_rolling[var3]
+        sc = axs[2].scatter(eps_sum, ds_rolling[var1],
+                            c=color_vals, cmap=cmap, norm=norm, s=5)
+
+        # Format axes
+        for ax, xlabel in zip(
+            axs,
+            [utilities.get_label(var2) + f" [{utilities.get_unit(ds,var2)}]", utilities.get_label(var3) + f" [{utilities.get_unit(ds,var2)}]", utilities.get_label(var2) + ' + ' + utilities.get_label(var3)+ f" [{utilities.get_unit(ds,var2)}]"]
+        ):
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+            ax.set_xlim(1e-8, 1e-4)
+            ax.set_ylim(1e-8, 1e-4)
+            ax.set_xlabel(xlabel)
+            ax.grid(True)
+
+        axs[0].set_ylabel(utilities.get_label(var1) + f"[{utilities.get_unit(ds,var1)}]")
+        fig.suptitle("All glider missions")
+
+        # Layout space for colorbar
+        fig.tight_layout(rect=[0, 0, 0.95, 1])
+
+        # Add colorbar
+        cbar = fig.colorbar(sc, ax=axs, orientation='vertical', fraction=0.02, pad=0.02)
+
+        if color_by == 'TIME':
+            cbar.set_ticks(np.arange(1.5, 13.5, 1))
+            cbar.ax.set_yticklabels([
+                'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+            ])
+            cbar.set_label("Month", fontsize=12)
+        else:
+            cbar.set_label(f"{color_by}", fontsize=12)
+
+        plt.show()
+    return fig, axs
+
+def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False):
+    """
+    Plots histograms of the specified variables from the dataset.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing the variables to plot.
+    vars : list of str
+        Variables to plot. Default is ['TEMP', 'PSAL'].
+    bins : int
+        Number of bins for the histogram. Default is 50.
+    log_scale : list of bool
+        If True, apply logarithmic scaling to the x-axis for the histogram.
+        Default is False.
+    density : bool
+        If True, normalize histograms to show probability density.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure object containing the plot.
+    axes : list of matplotlib.axes.Axes
+        List of axis objects containing the plots.
+    """
+    if isinstance(vars, str):
+        vars = [vars]
+
+    if isinstance(log_scale, bool):
+        log_scale = [log_scale] * len(vars)
+    elif len(log_scale) != len(vars):
+        raise ValueError("Length of log_scale must match length of vars.")
+
+    num_vars = len(vars)
+    n_cols = 3
+    n_rows = int(np.ceil(num_vars / n_cols))
+
+    with plt.style.context(plotting_style):
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 6 * n_rows))
+        axes = axes.flatten()
+
+        for i, var in enumerate(vars):
+            if var not in ds:
+                raise ValueError(f'Variable "{var}" not found in dataset.')
+
+            data = ds[var].values.flatten()
+            data = data[~np.isnan(data)]
+
+            if log_scale[i]:
+                data = data[data > 0]  # Remove non-positive values
+                data = np.log10(data)
+                x_label = f'log₁₀({utilities.get_label(var)} [{utilities.get_unit(ds, var)}])'
+            else:
+                x_label = f"{utilities.get_label(var)} ({utilities.get_unit(ds, var)})"
+
+            ax = axes[i]
+            ax.hist(data, bins=bins, alpha=0.7, color='C0', density=density)
+
+            ax.set_xlabel(x_label)
+            ax.set_ylabel('Probability Density' if density else 'Frequency')
+            ax.set_title(f'Histogram of {utilities.get_label(var)}', fontsize=14)
+
+        # Hide unused subplots
+        for j in range(num_vars, len(axes)):
+            fig.delaxes(axes[j])
+
+        plt.tight_layout()
+        return fig, axes[:num_vars]
+
 

@@ -5,11 +5,12 @@ from tqdm import tqdm
 import regionmask as rm
 from scipy.signal import convolve
 from scipy.signal.windows import hann
-from scipy.integrate import cumulative_trapezoid
+from scipy.integrate import cumulative_trapezoid, trapezoid
 import pandas as pd
 from scipy.signal import butter, filtfilt
+from dissipationSML import utilities
 
-def add_pot_densities(ds: xr.Dataset, use_raw: bool = True):
+def add_densities(ds: xr.Dataset, use_raw: bool = True):
     """
     This function computes the potential density and its anomaly with respect to 0 dbar and 1000 dbar
     from the salinity and temperature data in the dataset. The computed values are added to the dataset if they do not
@@ -69,7 +70,7 @@ def add_pot_densities(ds: xr.Dataset, use_raw: bool = True):
 
     return ds
 
-def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
+def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Dataset:
     """
     Compute and add total vertical water velocity (W) to the dataset.
 
@@ -79,6 +80,10 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     ----------
     ds : xarray.Dataset
         Dataset containing 'DEPTH', 'TIME', and 'GLIDER_VERT_VELO_MODEL'.
+    pitch_min : float
+        Minimum pitch angle in degrees for climb profiles.
+    pitch_max : float
+        Maximum pitch angle in degrees for dive profiles.
 
     Returns
     -------
@@ -89,8 +94,17 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     time = ds['TIME'].values
     depth = ds['DEPTH'].values
     glider_velo = ds['GLIDER_VERT_VELO_MODEL'].values
-    # Clean glider velocity data
-    #glider_velo[np.abs(glider_velo) > 20] = np.nan
+    profile_number = ds['PROFILE_NUMBER'].values.astype(int)
+    # Clean glider velocity data by using PITCH
+    pitch = ds['PITCH'].values
+    print(profile_number.dtype)
+
+    msk1 = ((profile_number % 2 == 0) & (pitch > pitch_min) & (pitch < pitch_max)) # Climb profiles with pitch in range 10 to 25
+    msk2 = ((profile_number % 2 == 1) & (pitch > -pitch_max) & (pitch < -pitch_min)) # Dive profiles with pitch in range -25 to -10
+
+    msk = msk1 | msk2
+
+    glider_velo = xr.where(msk, glider_velo, np.nan)
 
     # Calculate vertical velocity from depth change (central difference, cm/s)
     ddepth = -(depth[2:] - depth[:-2]) * 100  # cm
@@ -102,13 +116,13 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     # Estimate measured vertical velocity
     w_meas = ddepth / dtime
     w_meas = np.concatenate(([np.nan], w_meas, [np.nan]))  # Pad ends with NaN
-    #w_meas[np.abs(w_meas) > 25] = np.nan  # Filter unrealistic values
 
 
     # Estimate vertical water velocity
     w_water = w_meas - glider_velo
-    #w_water[np.abs(w_water) > 5] = np.nan
     w_water[depth < 10] = np.nan  # Ignore shallow data
+    ### ignore values above 10 cm/s
+    w_water[np.abs(w_water) > 10] = np.nan  # Ignore extreme values
 
     # Create DataArrays with metadata
     da_w_meas = xr.DataArray(
@@ -140,20 +154,14 @@ def add_vertical_water_velocity(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def adiabatic_N2_profile(press, temp, SA, lat, plev=20):
+def sorted_N2_profile(df, plev=20):
     """
     Compute adiabatic N² for a single vertical profile.
 
     Parameters
     ----------
-    press : 1D array
-        Pressure in dbar
-    temp : 1D array
-        In-situ temperature in °C
-    SA : 1D array
-        Absolute salinity in g/kg
-    lat : float
-        Latitude of the profile in degrees
+    df : pandas.DataFrame
+        DataFrame containing the profile data with columns 'PRES', 'TEMP', 'PSAL', 'LATITUDE', and 'LONGITUDE'.
     plev : float, optional
         Pressure level in dbar for averaging (default is 20 dbar)
 
@@ -162,55 +170,69 @@ def adiabatic_N2_profile(press, temp, SA, lat, plev=20):
     n2_bray : 1D array
         Brunt–Väisälä frequency squared (N²) estimate
     """
-    press = np.array(press)
-    temp = np.array(temp)
-    SA = np.array(SA)
+    press = df['PRES'].to_numpy()
+    temp = df['TEMP'].to_numpy()
+    salinity = df['PSAL'].to_numpy()
+    lat = float(np.nanmean(df['LATITUDE']))
+    lon = float(np.nanmean(df['LONGITUDE']))
+
+    SA = gsw.SA_from_SP(salinity, press, lon, lat)
+    CT = gsw.CT_from_t(SA, temp, press)
+    rho = gsw.rho(SA, CT, press)
+
+    gravities = gsw.grav(lat, press)
 
     n = len(press)
     n2_bray = np.full(n, np.nan)
-    nan_warning_levels = []  # store pressure levels with all-NaN density
+    p_bars = np.full(n, np.nan)
+    alpha_1s = np.full(n, np.nan)
 
     for jj in range(n):
         if np.isnan(press[jj]):
             continue
 
-        # Define pressure window
         pmin_lev = max(press[jj] - plev / 2, np.nanmin(press))
         pmax_lev = min(press[jj] + plev / 2, np.nanmax(press))
         icyc = np.where((press >= pmin_lev) & (press <= pmax_lev))[0]
 
-        if len(icyc) == 0:
+        if len(icyc) < 2:
             continue
 
         pbar = np.nanmean(press[icyc])
-        theta = gsw.pt_from_t(SA[icyc], temp[icyc], press[icyc], pbar)
-        CT = gsw.CT_from_t(SA[icyc], temp[icyc], press[icyc])
-        rho = gsw.density.rho(SA[icyc], CT, press[icyc])
+        p_bars[jj] = pbar
 
-        if np.all(np.isnan(rho)):
-            nan_warning_levels.append(pbar)
-            continue
+        pot_rho = gsw.pot_rho_t_exact(SA[icyc], temp[icyc], press[icyc], pbar)
 
-        rhobar = np.nanmean(rho)
-        pot_rho = gsw.pot_rho_t_exact(SA[icyc], temp[icyc], press[icyc], rhobar)
-        sv = 1 / pot_rho
+        sv = 1 / pot_rho  
+        press_pas = press[icyc] * 1e4  # dbar → Pa
 
-        if len(press[icyc]) > 1:
-            press_pas = press[icyc] * 1e4  # convert dbar to Pa
-            coeffs = np.polyfit(press_pas, sv, 1)
-            alpha_1 = coeffs[0]
+        # Fast slope calculation (linear regression)
+        x = press_pas
+        y = sv
+        alpha_1 = np.cov(x, y)[0, 1] / np.var(x)
 
-            depth = -gsw.z_from_p(pbar, lat)
-            g = gsw.grav(lat, depth)
+        g = gravities[jj]
+        rhobar = np.nanmean(rho[icyc])
 
-            n2_bray[jj] = rhobar**2 * g**2 * -alpha_1
+        n2_bray[jj] = rhobar**2 * g**2 * -alpha_1
+        alpha_1s[jj] = alpha_1
 
-    # Print summary warning if any full-NaN density windows were found
-    if nan_warning_levels:
-        formatted = ", ".join(f"{p:.1f}" for p in nan_warning_levels)
-        #print(f"Warning: All density values were NaN at the following pressure levels (dbar): {formatted}")
+    ### interpolate n2_bray to match the original pressure levels
+    ### if press is not increasing, sort and then interpolate and sort back
+    if not np.all(np.diff(press) > 0):
+        sorted_indices = np.argsort(press)
+        press_sorted = press[sorted_indices]
+        n2_bray_sorted = n2_bray[sorted_indices]
+        p_bars_sorted = p_bars[sorted_indices]
 
-    return n2_bray
+        n2_bray_interp = np.interp(press_sorted, p_bars_sorted, n2_bray_sorted, left=np.nan, right=np.nan)
+
+        # Sort back to original order
+        n2_bray_interp = n2_bray_interp[np.argsort(sorted_indices)]
+    else:
+        n2_bray_interp = np.interp(press, p_bars, n2_bray, left=np.nan, right=np.nan)
+
+    return pd.DataFrame({'SORTED_N2': n2_bray_interp, 'PRES':press, 'P_BAR': p_bars, "ALPHA_1": alpha_1s})
 
 def add_adiabatic_sorted_N2(ds, plev = 20):
     """
@@ -228,31 +250,24 @@ def add_adiabatic_sorted_N2(ds, plev = 20):
     ds : xarray.Dataset
         The dataset with the adiabatic N² variable added.
     """
-    profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
-    n2_list = []
-    for profile_number in tqdm(profile_numbers):
-        profile_data = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
-        PRES = profile_data.PRES.values
-        TEMP = profile_data.TEMP.values
-        PSAL = profile_data.PSAL.values
-        ### mean the lat and long values for the profile
-        lat = np.nanmean(profile_data.LATITUDE.values)
-        long = np.nanmean(profile_data.LONGITUDE.values)
-        SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
-        
-        n2_bray = adiabatic_N2_profile(PRES, TEMP, SA, lat, plev=plev)
-        n2_list.append(n2_bray)
-    n2_bray_sorted = np.concatenate(n2_list)
+    groups = utilities.group_by_profiles(ds, ["PRES","TEMP","PSAL","LATITUDE","LONGITUDE", "DEPTH","TIME"])
+    print(f"Calculating adiabatic N² for {len(groups)} profiles...")
+    df = groups.apply(sorted_N2_profile,plev=plev)
 
     dims = list(ds.dims.keys())[0]
 
-    n2_bray_sorted = xr.DataArray(n2_bray_sorted, dims=dims,attrs={
-        'long_name': 'Adiabatic Brunt-Väisälä frequency squared',
+    SORTED_N2_da = xr.DataArray(df['SORTED_N2'].to_numpy(), dims=dims, attrs={
+        'long_name': 'Adiabatically sorted Brunt-Väisälä frequency squared',
         'units': '1/s^2',
-        'plev': plev
-    })
+        'plev': plev})
+    
+    ALPHA_1_da = xr.DataArray(df['ALPHA_1'].to_numpy(), dims=dims, attrs={
+        'long_name': 'dV/dP slope',
+        'units': 'm^3/kg/Pa',
+        'plev': plev})
 
-    ds['ADIABATIC_N2'] = n2_bray_sorted
+    ds['SORTED_N2'] = SORTED_N2_da
+    ds['ALPHA_1'] = ALPHA_1_da
 
     return ds
 
@@ -299,7 +314,7 @@ def add_unsorted_N2(ds):
 
     return ds
 
-def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_filtered', window_size_seconds=100):
+def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds=100):
     """
     Compute RMS of velocity in a moving window for each profile and add it to the dataset as 'VELOCITY_SCALE'.
 
@@ -325,8 +340,7 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_filtered', window_size_s
         if dims == 'N_MEASUREMENTS':
             ds_profile = ds.sel(N_MEASUREMENTS=ds.PROFILE_NUMBER == profile_number)
         elif dims == 'TIME':
-            ds_profile = ds.sel(TIME=ds.PROFILE_NUMBER == profile_number)
-        
+            ds_profile = ds.sel(TIME=ds.PROFILE_NUMBER == profile_number)            
 
         time_vals = ds_profile.TIME.values
         if len(time_vals) < 2:
@@ -347,7 +361,12 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_filtered', window_size_s
 
         # Compute RMS
         velocity_squared = ds_profile[var] ** 2
-        velocity_scale = velocity_squared.rolling(TIME=window_size, center=True).mean() ** 0.5
+        def rolling_rms(arr, window_size, dim="TIME"):
+            rolled = arr.rolling({dim: window_size}, center=True)
+            constructed = rolled.construct(f"{dim}_window")
+            return constructed.mean(f"{dim}_window", skipna=True) ** 0.5
+        #velocity_scale = velocity_squared.rolling(TIME=window_size, center=True).mean() ** 0.5
+        velocity_scale = rolling_rms(velocity_squared, window_size, dim=dims)
 
         all_velocity_scales.append(velocity_scale)
 
@@ -404,13 +423,17 @@ def LEM_dissipation(ds, c=0.37):
         The dataset with a new variable 'DISSIPATION_LEM'.
     """
     # Ensure required variables exist
-    if 'ADIABATIC_N2' not in ds or 'VELOCITY_SCALE' not in ds:
-        raise ValueError("Dataset must contain 'ADIABATIC_N2' and 'VELOCITY_SCALE' variables.")
+    if 'SORTED_N2' not in ds or 'VELOCITY_SCALE' not in ds:
+        raise ValueError("Dataset must contain 'SORTED_N2' and 'VELOCITY_SCALE' variables.")
 
     # Compute dissipation
     velocity_scale = ds['VELOCITY_SCALE']
-    N = ds['ADIABATIC_N2'] ** 0.5
+    N = ds['SORTED_N2'] ** 0.5
     dissipation = c * N * (velocity_scale ** 2)
+    
+    ###mask all values below 1e-10
+    #dissipation = dissipation.where(dissipation > 1e-10, drop=True)
+
     dissipation_log = np.log10(dissipation)
 
     # Add to dataset with metadata
@@ -429,59 +452,6 @@ def LEM_dissipation(ds, c=0.37):
     }
 
     return ds
-
-
-def rms_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: float) -> xr.Dataset:
-    """
-    Calculate the Root Mean Square (RMS) of variables between min_depth and the mixed layer depth (MLD) for each profile.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        Dataset containing variables (e.g., 'TEMP', 'PSAL', etc.) and 'DEPTH'.
-    mld_ds : xarray.Dataset
-        Dataset containing 'MLD' and 'PROFILE_NUMBER'.
-    vars : list of str
-        Variable names for which to compute the RMS within the MLD range.
-    min_depth : float
-        Minimum depth to start the RMS calculation.
-
-    Returns
-    -------
-    xarray.Dataset
-        The input MLD dataset with new variables added: '<var>_RMS' for each input variable.
-    """
-    mld_ds = mld_ds.copy()
-
-    for var in vars:
-        print(f"Calculating RMS for {var}...")
-        rms_values = []
-
-        for i in tqdm(range(len(mld_ds['PROFILE_NUMBER']))):
-            profile_number = mld_ds['PROFILE_NUMBER'].values[i]
-            mld_depth = mld_ds['MLD'].values[i]
-
-            if np.isnan(mld_depth):
-                rms_values.append(np.nan)
-                continue
-
-            # Extract variable and depth for current profile
-            profile_mask = ds['PROFILE_NUMBER'] == profile_number
-            profile_values = ds[var].where(profile_mask, drop=True)
-            profile_depth = ds['DEPTH'].where(profile_mask, drop=True)
-
-            # Mask to depths within min_depth and MLD
-            valid_mask = (profile_depth >= min_depth) & (profile_depth <= mld_depth)
-            values_in_range = profile_values.where(valid_mask, drop=True)
-
-            # Compute RMS and store
-            
-            rms_values.append(rms)
-
-        # Add the result to the MLD dataset
-        mld_ds[var + '_RMS'] = ('TIME', rms_values)
-
-    return mld_ds
 
 def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
     """
@@ -533,18 +503,28 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
 
     return mld_ds
 
-from scipy.integrate import trapezoid
-
-def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: float = 0) -> xr.Dataset:
+def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
     """
-    Integrate variables between min_depth and the mixed layer depth (MLD) for each profile,
-    safely handling NaNs.
+    Calculate the integral of variables in the mixed layer depth (MLD) for each profile.
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing variables (e.g., 'TEMP', 'PSAL', etc.) and 'DEPTH'.
+    mld_ds : xarray.Dataset
+        Dataset containing 'MLD' and 'PROFILE_NUMBER'.
+    vars : list of str
+        Variable names for which to compute the MLD integral.
+    Returns
+    -------
+    xarray.Dataset
+        The input MLD dataset with new variables added: '<var>_TOTAL' and '<var>_MIN_DEPTH' for each input variable.
     """
     mld_ds = mld_ds.copy()
 
     for var in vars:
         print(f"Calculating integral for {var}...")
         integral_values = []
+        min_valid_depth = []
 
         for i in tqdm(range(len(mld_ds['PROFILE_NUMBER']))):
             profile_number = mld_ds['PROFILE_NUMBER'].values[i]
@@ -552,36 +532,50 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth: 
 
             if np.isnan(mld_depth):
                 integral_values.append(np.nan)
+                min_valid_depth.append(np.nan)
                 continue
 
-            # Extract profile data
+            # Extract variable and depth for current profile
             profile_mask = ds['PROFILE_NUMBER'] == profile_number
-            profile_values = ds[var].where(profile_mask, drop=True)
-            profile_depth = ds['DEPTH'].where(profile_mask, drop=True)
 
-            # Drop NaNs in both arrays
-            valid = (~np.isnan(profile_values)) & (~np.isnan(profile_depth)) & (profile_values > 1e-10)
-            if valid.sum() < 2:
-                integral_values.append(np.nan)
-                continue
+            profile = ds.where(profile_mask, drop=True)
+            # cut the profile to the MLD depth
+            profile = profile.where(profile.DEPTH <= mld_depth, drop=True)
 
-            profile_values = profile_values.values[valid]
-            profile_depth = profile_depth.values[valid]
+
+            profile_var = profile[var].values
+            profile_depth = profile['DEPTH'].values
 
             # Sort by depth
             sort_idx = np.argsort(profile_depth)
             depth_sorted = profile_depth[sort_idx]
-            values_sorted = profile_values[sort_idx]
+            var_sorted = profile_var[sort_idx]
 
-            # Mask within integration bounds
-            mask = (depth_sorted >= min_depth) & (depth_sorted <= mld_depth)
-            if np.count_nonzero(mask) >= 2:
-                integral_value = trapezoid(values_sorted[mask], depth_sorted[mask])
-                integral_values.append(integral_value)
-            else:
+            # Exclude leading NaNs in values_sorted
+            # Find first non-NaN index
+            var_trimmed, start, end = trim_nan_edges(var_sorted)
+            depth_trimmed = depth_sorted[start:end]
+            if len(var_trimmed) == 0:
+                # No valid data
                 integral_values.append(np.nan)
+                min_valid_depth.append(np.nan)
+                continue
+
+            # Interpolate internal NaNs linearly
+            msk = np.isnan(var_trimmed)
+            
+            if len(var_trimmed[~msk]) < 2:
+                integral_values.append(np.nan)
+                min_valid_depth.append(np.nan)
+                continue
+            var_interp = np.interp(depth_trimmed, depth_trimmed[~msk], var_trimmed[~msk], left=np.nan, right=np.nan)
+
+            integral_value = trapezoid(var_interp, depth_trimmed)
+            integral_values.append(integral_value)
+            min_valid_depth.append(depth_trimmed[0])
 
         mld_ds[var + '_TOTAL'] = ('TIME', integral_values)
+        mld_ds[var + '_MIN_DEPTH'] = ('TIME', min_valid_depth)
 
     return mld_ds
 
@@ -607,12 +601,6 @@ def trim_nan_edges(arr):
     first = np.argmax(is_not_nan)
     last = len(arr) - np.argmax(is_not_nan[::-1])
     return arr[first:last], first, last
-
-import numpy as np
-import xarray as xr
-from scipy.signal import butter, filtfilt
-from tqdm import tqdm
-import pandas as pd
 
 def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=40):
     """
@@ -653,11 +641,13 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
         wn = fc / (fs / 2)
         b, a = butter(order, wn, btype='high')
 
-        binned_df = bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE'], binning=mean_dt, dim='TIME')
+        binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE'], binning=None, dim='TIME',max_interval = max_interval)
         signal = binned_df[var].values
 
         profile_filtered = np.full_like(signal, np.nan)
         trimmed, start, end = trim_nan_edges(signal)
+
+        valid = ~np.isnan(trimmed)
 
         # Interpolate NaNs before filtering
         if np.isnan(trimmed).any():
@@ -666,9 +656,11 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
 
         if len(trimmed) > 3 * max(len(a), len(b)):
             filtered = filtfilt(b, a, trimmed)
+            ### set all NaNs to NaN in the filtered signal
+            filtered[~valid] = np.nan
             profile_filtered[start:end] = filtered
 
-        binned_df[f'{var}_filtered'] = profile_filtered
+        binned_df[f'{var}_HP'] = profile_filtered
         binned_df['PROFILE_NUMBER'] = profile.PROFILE_NUMBER.values[0]
         return xr.Dataset.from_dataframe(binned_df.set_index('TIME'))
 
@@ -686,304 +678,10 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
     result = xr.concat(filtered, dim='TIME')
     result = result.sortby('TIME')
     result.attrs = ds.attrs
-    result[f'{var}_filtered'].attrs = ds[var].attrs
-    result[f'{var}_filtered'].attrs['filter'] = 'highpass_time'
+    result[f'{var}_HP'].attrs = ds[var].attrs
+    result[f'{var}_HP'].attrs['filter'] = 'highpass_time'
 
     return result
-
-def highpass_butterworth(ds_binned, var, cutoff_wavelength=30, order=4):
-    """
-    Calculates a highpass Butterworth filter for a given variable in the dataset.
-    
-    Parameters
-    ----------
-    ds_binned: xr.Dataset
-        Binned dataset containing the variable to be filtered.
-    var: str
-        Variable name to be filtered.
-    cutoff_wavelength: float
-        Cutoff wavelength in meters. Default is 30 m.
-    order: int
-        Order of the Butterworth filter. Default is 4.
-    Returns
-    -------
-    ds_binned: xr.Dataset
-        Binned dataset with the filtered variable added.
-    """
-    dz = ds_binned.attrs['binning']
-    fs = 1 / dz
-    fc = 1 / cutoff_wavelength
-    fn = fs / 2
-    normalized_cutoff = fc / fn
-    b, a = butter(order, normalized_cutoff, btype='high', analog=False)
-
-    profile_numbers = np.unique(ds_binned.PROFILE_NUMBER.values)
-
-    full_filtered = []
-    for profile_number in profile_numbers:
-        profile = ds_binned.sel(TIME = ds_binned.PROFILE_NUMBER == profile_number)
-
-        var_data = profile[var].values
-
-        trimmed_var, start_idx, end_idx = trim_nan_edges(var_data)
-        profile_filtered = np.full_like(var_data, np.nan)
-
-        if len(trimmed_var) > 3 * max(len(a), len(b)):
-            filtered_segment = filtfilt(b, a, trimmed_var)
-            profile_filtered[start_idx:end_idx] = filtered_segment
-        else:
-            print(f"Skipping profile {profile_number}: too short for filtering")
-
-        full_filtered.append(profile_filtered)
-    full_filtered = np.concatenate(full_filtered)
-    ds_binned[var + '_filtered'] = (('TIME'), full_filtered)
-    ds_binned[var + '_filtered'].attrs = ds_binned[var].attrs
-    ds_binned[var + '_filtered'].attrs['filter'] = 'highpass'
-
-    return ds_binned
-
-
-def construct_2dgrid(x, y, v, xi=1, yi=1, x_bin_center: bool = True, y_bin_center: bool = True, agg: str = 'median'):
-
-    """
-    Constructs a 2D gridded representation of input data based on specified resolutions. The function takes in x, y, and v data,
-    and generates a grid where each cell contains the aggregated value (e.g., mean, median) of v corresponding to the x and y coordinates.
-    If the input data is already binned and you want the grid coordinates to align with the original bin edges, set `x_bin_center` and `y_bin_center` to False and the 
-    resolution (i.e. xi and yi) to the bin size.
-
-    Parameters
-    ----------
-    x : array-like  
-        Input data representing the x-dimension.  
-    y : array-like  
-        Input data representing the y-dimension.  
-    v : array-like  
-        Input data representing the z-dimension (values to be gridded).  
-    xi : int or float, optional, default=1  
-        Resolution for the x-dimension grid spacing.  
-    yi : int or float, optional, default=1  
-        Resolution for the y-dimension grid spacing.
-    x_bin_center : bool, optional, default=True
-        If True, the x-coordinate grid (`XI`) corresponds to the **center** of each x-bin.
-        If False, it corresponds to the **left edge** of each bin.
-        This is especially useful if the input `x` data is already binned with the same resolution as `xi`,
-        and you want the grid coordinates to align with the original bin edges. (e.g. profile numbers).
-    y_bin_center : bool, optional, default=True
-        Same as `x_bin_center`, but for the y-coordinate grid (`YI`).
-        Set to False if your `y` data is already pre-binned with the same resolution as `yi`.
-    agg : str, optional, default='median'
-        Aggregation method to be used for gridding. Options include 'mean', 'median', etc.
-
-    Returns
-    -------
-    grid : numpy.ndarray  
-        Gridded representation of the z-values over the x and y space.  
-    XI : numpy.ndarray  
-        Gridded x-coordinates corresponding to the specified resolution.  
-    YI : numpy.ndarray  
-        Gridded y-coordinates corresponding to the specified resolution. 
-
-    Notes
-    -----
-    Original Author: Bastien Queste
-    [Source Code](https://github.com/bastienqueste/gliderad2cp/blob/de0652f70f4768c228f83480fa7d1d71c00f9449/gliderad2cp/process_adcp.py#L140)
-    
-    Modified by Till Moritz: added the aggregation parameter and the option to chose either bin center or bin edge as the grid coordinates.
-    """
-    if np.size(xi) == 1:
-        xi = np.arange(np.nanmin(x), np.nanmax(x) + xi+1, xi)
-    if np.size(yi) == 1:
-        yi = np.arange(np.nanmin(y), np.nanmax(y) + yi+1, yi)
-
-    raw = pd.DataFrame({'x': x, 'y': y, 'v': v}).dropna()
-    grid = np.full([len(xi)-1, len(yi)-1], np.nan)
-
-    raw['xbins'], xbin_iter = pd.cut(raw.x, xi, retbins=True, labels=False, include_lowest=True, right=False)
-    raw['ybins'], ybin_iter = pd.cut(raw.y, yi, retbins=True, labels=False, include_lowest=True, right=False)
-
-    raw = raw.dropna(subset=['xbins', 'ybins'])  # Remove out-of-bound rows
-    _tmp = raw.groupby(['xbins', 'ybins'])['v'].agg(agg)
-    grid[_tmp.index.get_level_values(0).astype(int), _tmp.index.get_level_values(1).astype(int)] = _tmp.values
-    # Match XI and YI shape to grid using bin centers
-    if x_bin_center:
-        xi = xi[:-1] + np.diff(xi) / 2
-    else:
-        xi = xi[:-1]
-    if y_bin_center:
-        yi = yi[:-1] + np.diff(yi) / 2
-    else:
-        yi = yi[:-1]
-    YI, XI = np.meshgrid(yi, xi)
-    return grid, XI, YI
-
-
-def bin_profile(ds_profile, vars, binning, dim='DEPTH', agg='mean'):
-    """
-    Bin a single profile dataset along a specified dimension ('DEPTH' or 'TIME').
-
-    Parameters
-    ----------
-    ds_profile : xr.Dataset or pd.DataFrame
-        Profile data with at least 'DEPTH', 'TIME', and target variables.
-    vars : list of str
-        Variables to be binned.
-    binning : float
-        Bin size in meters (DEPTH) or seconds (TIME).
-    dim : str, default 'DEPTH'
-        Dimension along which to bin ('DEPTH' or 'TIME').
-    agg : str, default 'mean'
-        Aggregation method: 'mean' or 'median'.
-
-    Returns
-    -------
-    binned_profile : pd.DataFrame
-        Binned profile data as DataFrame.
-    """
-
-    # Ensure single profile
-    profile_number = ds_profile['PROFILE_NUMBER'].values if isinstance(ds_profile, xr.Dataset) else ds_profile.index.values
-    if len(np.unique(profile_number)) > 1:
-        raise ValueError("Only one profile can be selected for binning.")
-
-    binned_data = {}
-
-    # Mask and extract dimension values
-    if dim == 'DEPTH':
-        mask = ds_profile[dim].values > 0
-        dim_values = ds_profile[dim].values[mask]
-    elif dim == 'TIME':
-        dim_values = ds_profile[dim].values.astype('float64') * 1e-9  # convert ns to s
-        mask = np.isfinite(dim_values)
-    else:
-        raise ValueError("`dim` must be either 'DEPTH' or 'TIME'")
-
-    profile_number = profile_number[mask]
-
-    # Handle very short or empty input
-    if len(dim_values) <= 1 or any(len(ds_profile[var]) <= 1 for var in vars):
-        return pd.DataFrame(columns=vars + [dim, 'PROFILE_NUMBER'])
-
-    # Bin each variable
-    for var in vars:
-        var_grid, profile_grid, bin_grid = construct_2dgrid(
-            profile_number, dim_values,ds_profile[var].values[mask],
-            xi=1, yi=binning,
-            x_bin_center=False, y_bin_center=True,
-            agg=agg
-        )
-        binned_data[var] = var_grid[0]
-
-    binned_data[dim] = bin_grid[0] * 1e9 if dim == 'TIME' else bin_grid[0]  # convert back to ns if needed
-    binned_data['PROFILE_NUMBER'] = profile_grid[0]
-
-    df = pd.DataFrame(binned_data)
-    if 'TIME' in df.columns or 'TIME' in df.index:
-        df['TIME'] = pd.to_datetime(df['TIME'], unit='ns', errors='coerce')
-
-    if dim == 'DEPTH':
-        if 'TIME' in df.columns:
-            df = df.set_index('DEPTH')
-            df['TIME'] = df['TIME'].interpolate(method='linear', limit_direction='both')
-            df = df.reset_index()
-    
-    return df
-
-def bin_all_profiles(ds, vars, binning, agg='mean', dim='DEPTH'):
-    """
-    Bin all profiles in the dataset along a specified dimension.
-
-    Parameters
-    ----------
-    ds : xr.Dataset
-        Input dataset with vertical or time-series profiles.
-    vars : list of str
-        Variables to be included in the binning.
-    binning : float
-        Bin size (in meters for DEPTH or seconds for TIME).
-    agg : str, default 'mean'
-        Aggregation method: 'mean' or 'median'.
-    dim : str, default 'DEPTH'
-        Dimension along which to bin: 'DEPTH' or 'TIME'.
-
-    Returns
-    -------
-    ds_binned : xr.Dataset
-        Binned dataset.
-    """
-
-    if agg not in ['mean', 'median']:
-        raise ValueError("agg must be 'mean' or 'median'")
-
-    required_vars = ['DEPTH', 'TIME', 'LONGITUDE', 'LATITUDE']
-    all_vars = list(set(vars + required_vars))
-
-    # Group dataset by profiles
-    grouped = group_by_profiles(ds, all_vars)
-
-    # Apply binning to each profile
-    binned_df = grouped.apply(bin_profile, vars=all_vars, binning=binning, agg=agg, dim=dim)
-
-    # Clean up DataFrame
-    if 'PROFILE_NUMBER' in binned_df.columns:
-        binned_df = binned_df.drop('PROFILE_NUMBER', axis=1)
-        binned_df = binned_df.reset_index()
-    if 'level_1' in binned_df.columns:
-        binned_df = binned_df.drop('level_1', axis=1)
-    if 'TIME' in binned_df.columns:
-        binned_df = binned_df.set_index('TIME')
-
-    # Convert to xarray Dataset
-    ds_binned = xr.Dataset.from_dataframe(binned_df)
-
-    # Convert time to datetime format
-    if 'TIME' in ds_binned:
-        ds_binned['TIME'] = ds_binned['TIME'].astype('datetime64[ns]')
-
-    # Copy over variable and global attributes
-    for var in ds_binned.data_vars:
-        ds_binned[var].attrs = ds[var].attrs if var in ds else {}
-    ds_binned.attrs = ds.attrs.copy()
-    ds_binned.attrs['binning'] = binning
-    ds_binned.attrs['binning_method'] = agg
-
-    ds_binned = ds_binned.sortby('TIME')
-
-    return ds_binned
-
-
-def group_by_profiles(ds, variables=None):
-    """
-    Group glider dataset by the dive profile number.
-
-    This function groups the dataset by the `PROFILE_NUMBER` column, where each group corresponds to a single profile.
-    The resulting groups can be evaluated statistically, for example using methods like `pandas.DataFrame.mean` or
-    other aggregation functions. To filter a specific profile, use `xarray.Dataset.where` instead.
-
-    Parameters
-    ----------
-    ds : xarray.Dataset
-        A 1-dimensional glider dataset containing profile information.
-    variables : list of str, optional
-        A list of variable names to group by, if only a subset of the dataset should be included in the grouping.
-        Grouping by a subset is more memory-efficient and faster.
-
-    Returns
-    -------
-    profiles : pandas.core.groupby.DataFrameGroupBy
-        A pandas `GroupBy` object, grouped by the `PROFILE_NUMBER` of the glider dataset.
-        This can be further aggregated using methods like `mean` or `sum`.
-
-    Notes
-    -----
-    This function is based on the original GliderTools implementation and was modified by
-    Chiara Monforte to ensure compliance with the OG1 standards.
-    [Source Code](https://github.com/GliderToolsCommunity/GliderTools/blob/master/glidertools/utils.py)
-    """
-    ds = ds.reset_coords().to_pandas().reset_index().set_index("PROFILE_NUMBER")
-    if variables:
-        return ds[variables].groupby("PROFILE_NUMBER")
-    else:
-        return ds.groupby("PROFILE_NUMBER")
 
 def compute_mld(ds: xr.Dataset, variable, method: str = 'threshold', threshold = 0.03, ref_depth = 10,
                  use_bins: bool = True, binning: float = 10):
@@ -1021,14 +719,14 @@ def compute_mld(ds: xr.Dataset, variable, method: str = 'threshold', threshold =
     Original Author: Till Moritz
     """
     if method == 'threshold':
-        groups = group_by_profiles(ds, [variable, "DEPTH","TIME","LONGITUDE","LATITUDE"])
+        groups = utilities.group_by_profiles(ds, [variable, "DEPTH","TIME","LONGITUDE","LATITUDE"])
         mld = groups.apply(mld_profile_treshhold, variable=variable, threshold=threshold,
                             ref_depth=ref_depth, use_bins=use_bins, binning=binning)
     elif method == 'CR':
         if variable != 'SIGMA_1':
             print(f"Warning: {variable} can not be used for convective resistance calulation. Instead use SIGMA_1 for CR calculation.")
             variable = 'SIGMA_1'
-        groups = group_by_profiles(ds, [variable, "DEPTH","TIME","LONGITUDE","LATITUDE"])
+        groups = utilities.group_by_profiles(ds, [variable, "DEPTH","TIME","LONGITUDE","LATITUDE"])
         if threshold > 0:
             print("Warning: CR threshold should be negative. Using -2 as default.")
             threshold = -2
@@ -1081,7 +779,7 @@ def mld_profile_treshhold(profile, variable: str = 'SIGMA_T', threshold: float =
     """
     
     if use_bins:
-        profile = bin_profile(profile, [variable], binning=binning)
+        profile = utilities.bin_profile(profile, [variable], binning=binning)
         depth = profile['DEPTH'].to_numpy()
         density = profile[variable].to_numpy()
     else:
@@ -1106,7 +804,7 @@ def mld_profile_treshhold(profile, variable: str = 'SIGMA_T', threshold: float =
 
     depth, density = depth[valid], density[valid]
     
-    if np.nanmean(np.diff(depth)) < 0:
+    if np.nanmean(depth) < 0:
         depth = -1 * depth
 
     # Sort by depth
@@ -1168,7 +866,7 @@ def mld_profile_CR(profile, threshold: float = -2, use_bins: bool = True, binnin
     Original author: Till Moritz
     """
     if use_bins:
-        profile = bin_profile(profile, ['SIGMA_1'], binning=binning)
+        profile = utilities.bin_profile(profile, ['SIGMA_1'], binning=binning)
 
     CR_df = calculate_CR_for_all_depth(profile)
     depth = CR_df['DEPTH'].to_numpy()
@@ -1490,80 +1188,57 @@ def dissipation_bouyancy_flux(ds):
     
     return ds
 
-def drag_coefficient_trenberth1990(U10):
-    """Calculate neutral drag coefficient from Trenberth et al. (1990) based on wind speed (U10 in m/s)."""
-    C_D = np.where(
-        U10 > 10,
-        (0.49 + 0.065 * U10) / 1000,
-        np.where(
-            U10 >= 3,
-            1.14 / 1000,
-            (0.62 + 1.56 / U10) / 1000
-        )
-    )
-    return C_D
-
-def add_wind_stress(ds,rho_air=1.225, Cd=0.0013):
+def add_u_star(ds):
     """
-    Add wind stress to the dataset based on the wind speed and friction velocity.
-
+    Add the friction velocity u_star to the dataset based on the wind stress and density.
+    
     Parameters
     ----------
-    ds : xarray.Dataset
-        Dataset containing wind speed and friction velocity.
-    rho_air : float, optional
-        Density of air in kg/m^3 (default is 1.225 kg/m^3).
-    Cd : float, optional
-        Set the drag coefficient (default is 0.0013). If set to None, it will be calculated based Trenberth et al. (1990).
+    ds : xarray.Dataset or pandas.DataFrame
+        Dataset of Dataframe containing wind stress and density.
     
     Returns
     -------
     xarray.Dataset
-        Dataset with wind stress added.
+        Dataset with u_star added.
     """
     
-    # Calculate wind stress based on wind speed and friction velocity
-    u10 = ds['u10']  # Eastward wind speed at 10m height in m/s
-    v10 = ds['v10']  # Northward wind speed at 10m height in m/s
-
-    U = np.sqrt(u10**2 + v10**2)  # Wind speed in m/s
-
-    if Cd is None:
-        Cd = drag_coefficient_trenberth1990(U) # Drag coefficient based on wind speed
+    tau = ds['tau']  # Wind stress [N/m^2]
+    rho = ds['SIGTHETA_MEAN']  # Density [kg/m^3]
     
-    # Calculate wind stress using bulk formula
-    TAU = rho_air * Cd * U**2  # Wind stress in N/m^2
-    tau = ds['tau']  # Wind stress in N/m^2
-    rho = ds['SIGTHETA_MEAN']
     # Calculate friction velocity
-    u_star = np.sqrt(tau / rho)  # Friction velocity in m/s from surface stress (ERA-5)
-    U_STAR = np.sqrt(TAU / rho)  # Friction velocity in m/s from bulk formula
+    u_star = np.sqrt(tau / rho)
     
-    ds['u_star'] = u_star
-    ds['U_STAR'] = U_STAR
-    ds['TAU'] = TAU
-
+    ds['U_STAR'] = u_star
     return ds
 
 def add_hs(ds):
     """
     Add the transition depth (Stokes depth) hs to the dataset. The calculation is based on Buckingham 2019.
-    """
-    g = 9.81 # gravitational acceleration
-    kappa = 0.4 # von Karman constant
-    T = ds['pp1d'] # peak wave period
-    c_p = g*T/(2*np.pi) # phase speed of peak wave
-    c_bar = 0.1*c_p # effective wave speed
 
-    H_s = ds['swh'] # significant wave height
-    u_star = ds['u_star'] # friction velocity from wind stress
-    U_STAR = ds['U_STAR'] # friction velocity from bulk formula
+    Parameters
+    ----------
+    ds : xarray.Dataset or pandas.DataFrame
+        Dataset of Dataframe containing significant wave height and wind stress.
+    Returns
+    -------
+    xarray.Dataset
+        Dataset with transition depth hs and Stokes depth H_S added.
+    """
+    g = 9.81 # gravitational acceleration [m/s^2]
+    kappa = 0.4 # von Karman constant 
+    T = ds['pp1d'] # peak wave period [s]
+    c_p = g*T/(2*np.pi) # phase speed of peak wave [m/s]
+    c_bar = 0.1*c_p # effective wave speed [m/s], based on Buckingham 2019
+
+    swh = ds['swh'] # significant wave height [m]
+    u_star = ds['U_STAR'] # friction velocity from wind stress (ERA-5) [m/s]‚
 
     # Calculate the transition depth
-    h_s = 0.3 * kappa * H_s * c_bar/u_star
-    H_S = 0.3 * kappa * H_s * c_bar/U_STAR
-    ds['h_s'] = h_s
-    ds['H_S'] = H_S
+    h_s = 0.3 * kappa * swh * c_bar/u_star
+
+    ds['H_S'] = h_s
+
     return ds
 
 def dissipation_wind_stress(ds):
@@ -1581,28 +1256,28 @@ def dissipation_wind_stress(ds):
         Dataset with wind stress added.
     """
     
-    ds = add_wind_stress(ds)
-    ds = add_hs(ds)
+    #ds = add_wind_stress(ds)
+    #ds = add_hs(ds)
     
     # Extract variables from dataset
     MLD = ds['MLD']             # Mixed layer depth [m]
     tau = ds['tau']             # Wind stress [N/m^2]
     rho = ds['SIGTHETA_MEAN']   # Density [kg/m^3]
-    h_s = ds['h_s']             # Transition depth [m]
-    H_S = ds['H_S']             # Stokes depth [m]
+    min_depth = ds['DISSIPATION_LEM_MIN_DEPTH']  # Minimum depth for dissipation calculation [m]
+    print(min_depth)
+    
 
     # Physical constant
     kappa = 0.4  # Von Karman constant
-    u_star = ds['u_star']  # Friction velocity [m/s]
-    U_STAR = ds['U_STAR']  # Friction velocity from bulk formula [m/s]
-
+    #u_star = ds['u_star']  # Friction velocity [m/s]
+    #U_STAR = ds['U_STAR']  # Friction velocity from bulk formula [m/s]
+    U_STAR = np.sqrt(tau/rho)
     # Compute epsilon_tau using conditional logic
     # Where h_s > MLD, epsilon_tau = nan; else compute full expression
-    epsilon_tau = xr.where(h_s > MLD , 0 , 
-                           (u_star ** 3) / kappa * np.log(MLD / h_s))
-    EPSILON_TAU = xr.where(H_S > MLD , 0 , 
-                           (U_STAR ** 3) / kappa * np.log(MLD / H_S))
-    ds['epsilon_tau'] = epsilon_tau
+   
+    EPSILON_TAU = xr.where(min_depth > MLD , 0 , 
+                           (U_STAR ** 3) / kappa * np.log(MLD / min_depth))
+    #ds['epsilon_tau'] = epsilon_tau
     ds['EPSILON_TAU'] = EPSILON_TAU
     
     return ds
