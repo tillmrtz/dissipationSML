@@ -17,6 +17,7 @@ importlib.reload(tools)
 importlib.reload(utilities)
 import matplotlib.cm as cm
 from scipy.interpolate import interp1d
+importlib.reload(utilities)
 
 
 import regionmask as rm
@@ -451,6 +452,7 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
 
     num_vars = len(vars)
     fig, ax = plt.subplots(num_vars, 1, figsize=(20, 7 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
+    images = []
     if num_vars == 1:
         ax = [ax]
 
@@ -484,10 +486,12 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
                 vmax=np.nanpercentile(values, 99.5)
             )
             im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, norm=norm)
+            images.append(im)
         else:
             im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap,
                                   vmin=np.nanpercentile(values, 0.5),
                                   vmax=np.nanpercentile(values, 99.5))
+            images.append(im)
         if mld_df is not None:
             if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
                 ax[i].plot(mld_df['PROFILE_NUMBER'], mld_df['MLD'], color='black', marker='o', linewidth=1,
@@ -539,8 +543,8 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
     time_ax.spines['bottom'].set_position(('outward', 40))
     time_ax.tick_params(rotation=35)
     
-    plt.tight_layout()
-    plt.show()
+    #plt.tight_layout()
+    #plt.show()
     
     return fig, ax
 
@@ -761,128 +765,191 @@ def plot_dive_depth(ds, dive_number):
         ax.grid(True)
     return fig, ax
 
-def plot_var_from_mld(mld_ds, vars, years=None, rolling_str='12h', plot_type='both', mission_cbar=True):
+def get_var_styles(var_list):
+    """Return line, marker, and color styles for a list of variables."""
+    linestyles = ['-', '--', '-.', ':']
+    markers = ['o', '*', 'x', '^']
+    colors = ['tab:blue', 'tab:orange', 'tab:gray', 'tab:cyan']
+    return (
+        {var: linestyles[i % len(linestyles)] for i, var in enumerate(var_list)},
+        {var: markers[i % len(markers)] for i, var in enumerate(var_list)},
+        {var: colors[i % len(colors)] for i, var in enumerate(var_list)}
+    )
+
+
+def plot_var_from_mld(mld_ds, vars, years=None, rolling_str='12h',
+                      plot_type='both', mission_cbar=True, one_plot=False):
     """
-    Plot one or more variables from MLD dataset(s), colored by glider mission.
+    Plot one or more variables from MLD dataset(s), colored by mission or variable.
 
     Parameters
     ----------
     mld_ds : xarray.Dataset or list of xarray.Dataset
-        MLD dataset(s) containing the variable(s) to plot. If a list, each entry is treated as a unique mission.
-    var : str or list of str
+        MLD dataset(s) containing the variable(s) to plot.
+    vars : str or list of str
         The variable(s) name(s) to plot.
     years : list of int or None
-        The years to plot. If None, plot the entire time range as a single plot.
+        The years to plot. If None, plot full time range.
     rolling_str : str
-        The rolling mean window string (e.g., '12h' for 12 hours).
+        Rolling mean window string (e.g., '12h').
     plot_type : str
-        What to plot: "both" (default), "scatter", or "rolling".
+        What to plot: 'both', 'scatter', or 'rolling'.
     mission_cbar : bool
-        Whether to display the mission colorbar (default is True).
+        Whether to display the mission colorbar.
+    one_plot : bool
+        If True, all variables go into one plot per year.
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-        The figure object containing the plots.
+    fig, axes : matplotlib Figure and Axes
     """
 
     if plot_type not in {'both', 'scatter', 'rolling'}:
         raise ValueError("plot_type must be 'both', 'scatter', or 'rolling'.")
 
     def get_mission_label(ds):
-        glider_id = ds['GLIDER'].values[0]
-        mission_id = ds['MISSION'].values[0]
-        return f"{glider_id}/{mission_id}"
+        return f"{ds['GLIDER'].values[0]}/{ds['MISSION'].values[0]}"
 
     # Normalize inputs
     mld_ds = [mld_ds] if not isinstance(mld_ds, list) else mld_ds
     var_list = [vars] if isinstance(vars, str) else vars
-    if years is not None and not isinstance(years, list):
-        years = [years]
+    years = [years] if isinstance(years, int) else years
 
-    # Mission color mapping
-    all_mission_labels = [get_mission_label(ds) for ds in mld_ds]
-    unique_missions = sorted(set(all_mission_labels), key=lambda x: x.split('/')[1])
-    mission_to_color_index = {label: i for i, label in enumerate(unique_missions)}
-    cmap = cm.get_cmap('tab20', len(unique_missions))
-    norm = mcolors.Normalize(vmin=0, vmax=len(unique_missions) - 1)
+    # Get styles
+    var_linestyle, var_marker, var_color_dict = get_var_styles(var_list)
 
-    # Determine number of plots
-    num_plots = len(var_list) * (len(years) if years else 1)
+    # Color per mission
+    mission_labels = [get_mission_label(ds) for ds in mld_ds]
+    unique_missions = sorted(set(mission_labels), key=lambda x: x.split('/')[1])
+    mission_cmap = cm.get_cmap('tab20', len(unique_missions))
+    mission_color_dict = {label: mission_cmap(i) for i, label in enumerate(unique_missions)}
 
+    # Determine number of subplots
+    time_splits = years if years else [None]
+    num_plots = len(time_splits) if one_plot else len(time_splits) * len(var_list)
+
+    # Setup figure
     with plt.style.context(plotting_style):
-        figsize = (25, 8 * num_plots + 2) if mission_cbar == True else (25, 8)
-        fig, axes = plt.subplots(num_plots, 1, figsize=figsize, sharex=False, sharey=False)
-        axes = [axes] if num_plots == 1 else axes
-            
-        plot_idx = 0  # To track subplot index
+        figsize = (25, 8 * num_plots + 2) if mission_cbar else (25, 8 * num_plots)
+        fig, axes = plt.subplots(num_plots, 1, figsize=figsize, squeeze=False)
+        axes = axes.flatten()
 
-        time_range = None
-        if years is None:
-            # Determine overall time extent for single-range plot
-            all_times = np.concatenate([ds['TIME'].values for ds in mld_ds])
-            time_range = (all_times.min(), all_times.max())
+        # Determine time range
+        all_times = np.concatenate([ds['TIME'].values for ds in mld_ds])
+        full_range = (all_times.min(), all_times.max())
 
-        for year in (years if years else [None]):
-            for var_name in var_list:
+        plot_idx = 0
+        for year in time_splits:
+            for v_block in ([var_list] if one_plot else [[v] for v in var_list]):
                 ax = axes[plot_idx]
-                label = utilities.get_label(var_name)
-                title_str = f'{label} colored by Mission - {year}' if year else f'{label} colored by Mission - Full Range'
-                ax.set_title(title_str, fontsize=20)
+                label_set = set()
+
+                # Title
+                year_str = f"{year}" if year else "Full Range"
+                ax.set_title(f"{' , '.join(v_block)} colored by "
+                             f"{'Mission' if mission_cbar else 'Variable'} - {year_str}", fontsize=20)
+
+                unit_set = set()
 
                 for ds in mld_ds:
                     ds = ds.sortby('TIME')
                     mission_label = get_mission_label(ds)
-                    mission_color = cmap(mission_to_color_index[mission_label])
 
-                    if var_name not in ds:
-                        continue
-
-                    # Filter by year if applicable
-                    ds_filtered = ds
-                    if year is not None:
-                        ds_filtered = ds.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
-                        if ds_filtered.TIME.size == 0:
+                    # Filter by year
+                    if year:
+                        ds = ds.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+                        if ds.TIME.size == 0:
                             continue
 
-                    # Rolling mean
-                    rolling = ds.resample(TIME=rolling_str).mean(dim='TIME').sortby('TIME')
-                    rolling_filtered = rolling
-                    if year is not None:
-                        rolling_filtered = rolling.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
+                    rolling = ds.resample(TIME=rolling_str, origin='epoch').mean(dim='TIME').sortby('TIME')
+                    delta = np.timedelta64(int(rolling_str[:-1]), rolling_str[-1])
+                    rolling['TIME'] = rolling['TIME'] + delta / 2
+                    
+                    if year:
+                        rolling = rolling.sel(TIME=slice(f'{year}-01-01', f'{year}-12-31'))
 
-                    if plot_type in {'both', 'scatter'}:
-                        ax.scatter(ds_filtered['TIME'].values, ds_filtered[var_name].values, c=[mission_color], s=10, label=None )
-                    if plot_type in {'both', 'rolling'}:
-                        ax.plot(rolling_filtered['TIME'].values, rolling_filtered[var_name].values, color=mission_color, linewidth=2)
+                    for var in v_block:
+                        if var not in ds:
+                            continue
 
-                # Axis formatting
-                if year is not None:
-                    ax.set_xlim(np.datetime64(f'{year}-01-01'), np.datetime64(f'{year}-12-31'))
+                        label = utilities.get_label(var)
+                        unit = utilities.get_unit(ds, var)
+                        unit_set.add(unit)
+
+                        color = mission_color_dict[mission_label] if mission_cbar else var_color_dict[var]
+                        linestyle = var_linestyle[var]
+                        marker = var_marker[var]
+
+                        scatter_lbl = f"{label} (scatter)"
+                        roll_lbl = f"{label} (rolling)"
+
+                        if plot_type in {'both', 'scatter'}:
+                            lbl = scatter_lbl if scatter_lbl not in label_set else None
+                            ax.scatter(ds['TIME'].values, ds[var].values, color=color,
+                                       marker=marker, s=35, alpha=0.6, label=lbl)
+                            label_set.add(scatter_lbl)
+
+                        if plot_type in {'both', 'rolling'}:
+                            lbl = roll_lbl if roll_lbl not in label_set else None
+                            ax.plot(rolling['TIME'].values, rolling[var].values, color=color,
+                                    linestyle=linestyle, linewidth=2, label=lbl)
+                            label_set.add(roll_lbl)
+
+                ax.set_xlim(full_range if not year else
+                            (np.datetime64(f'{year}-01-01'), np.datetime64(f'{year}-12-31')))
+
+                if len(unit_set) == 1:
+                    labels = " , ".join([f"{utilities.get_label(v)}" for v in v_block])
+                    ax.set_ylabel(f"{labels} [{list(unit_set)[0]}]", fontsize=18)
                 else:
-                    ax.set_xlim(time_range)
-                if var_name == 'MLD':
-                    ax.set_ylim(0, 700)
-                    ax.invert_yaxis()
-                unit = utilities.get_unit(ds, var_name)
-                ax.set_ylabel(f'{label} [{unit}]', fontsize=20)
+                    ylabel = " , ".join([f"{utilities.get_label(v)} [{utilities.get_unit(ds, v)}]" for v in v_block])
+                    ax.set_ylabel(ylabel, fontsize=18)
+
                 ax.grid(True)
-                #ax.tick_params(axis='both', which='major', labelsize=18)
+                ax.legend(fontsize=12)
                 plot_idx += 1
 
-        # Label only the last subplot’s x-axis
         axes[-1].set_xlabel('Time', fontsize=18)
         fig.tight_layout(rect=[0, 0, 1, 1])
 
-        # Shared colorbar
         if mission_cbar:
-            sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-            cbar = fig.colorbar(sm, ax=axes, orientation='horizontal', fraction=0.15, pad=0.1 / num_plots)
+            sm = cm.ScalarMappable(norm=mcolors.Normalize(vmin=0, vmax=len(unique_missions) - 1),
+                                   cmap=mission_cmap)
+            cbar = fig.colorbar(sm, ax=axes, orientation='horizontal',
+                                fraction=0.15, pad=0.1 / num_plots)
             cbar.set_ticks(np.arange(len(unique_missions)))
             cbar.set_ticklabels(unique_missions)
             cbar.set_label('Mission (Glider/MissionDate)', fontsize=14)
 
     return fig, axes
+
+def fit_linear_regression(x, y):
+    """
+    Fits a linear regression to the provided x and y data.
+
+    Parameters
+    ----------
+    x : array-like
+        Independent variable data.
+    y : array-like
+        Dependent variable data.
+
+    Returns
+    -------
+    slope : float
+        The slope of the fitted line.
+    intercept : float
+        The intercept of the fitted line.
+    residuals : float or None
+        The sum of squared residuals, or None if no residuals are available.
+    """
+    msk = ~np.isnan(x) & ~np.isnan(y)
+    x = x[msk]
+    y = y[msk]
+    p = np.polyfit(x, y, 1)
+    slope, intercept = p
+
+    return slope, intercept
 
 def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
     """
@@ -914,7 +981,7 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
     # Color setup
     if color_by == 'TIME':
         months = ds_rolling.TIME.dt.month
-        cmap = plt.cm.PuOr_r
+        cmap = plt.cm.twilight_shifted
         boundaries = np.arange(1, 14)
         norm = mcolors.BoundaryNorm(boundaries, cmap.N)
         color_vals = months
@@ -925,11 +992,11 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
 
     var1 = 'DISSIPATION_LEM_TOTAL'
     var2 = 'EPSILON_TAU'
-    var3 = 'epsilon_Q'
+    var3 = 'EPSILON_Q'
 
     with plt.style.context(plotting_style):
     # Set up figure
-        fig, axs = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+        fig, axs = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
 
         # Scatter plots
         axs[0].scatter(ds_rolling[var2], ds_rolling[var1],
@@ -941,6 +1008,16 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
         eps_sum = ds_rolling[var2] + ds_rolling[var3]
         sc = axs[2].scatter(eps_sum, ds_rolling[var1],
                             c=color_vals, cmap=cmap, norm=norm, s=5)
+        
+        ### add linear regression lines to the last subplot
+        slope, intercept = fit_linear_regression(np.log10(eps_sum.values), np.log10(ds_rolling[var1].values))
+        x_fit = np.logspace(np.log10(np.nanmin(eps_sum)), np.log10(np.nanmax(eps_sum)), 100)
+        y_fit = 10**(slope * np.log10(x_fit) + intercept)
+        axs[2].plot(x_fit, y_fit, color='red', linestyle='--', linewidth=1.5, label='Linear Fit')
+        
+        ### plot a 1:1 line for all three plots
+        for ax in axs:
+            ax.plot([1e-8, 1e-4], [1e-8, 1e-4], color='black', linestyle='--', linewidth=0.5, label='1:1 line')
 
         # Format axes
         for ax, xlabel in zip(
@@ -955,7 +1032,9 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
             ax.grid(True)
 
         axs[0].set_ylabel(utilities.get_label(var1) + f"[{utilities.get_unit(ds,var1)}]")
-        fig.suptitle("All glider missions")
+
+        Glidemission = ds['GLIDER'][0].values + '/' + ds['MISSION'][0].values
+        fig.suptitle(Glidemission)
 
         # Layout space for colorbar
         fig.tight_layout(rect=[0, 0, 0.95, 1])
@@ -976,7 +1055,7 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
         plt.show()
     return fig, axs
 
-def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False):
+def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False, ax = None, **kwargs):
     """
     Plots histograms of the specified variables from the dataset.
 
@@ -1014,8 +1093,13 @@ def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = 
     n_rows = int(np.ceil(num_vars / n_cols))
 
     with plt.style.context(plotting_style):
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 6 * n_rows))
-        axes = axes.flatten()
+        if ax is None:  
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 6 * n_rows))
+            force_plot = True
+        else:
+            fig = plt.gcf()
+            axes = [ax]
+            force_plot = False
 
         for i, var in enumerate(vars):
             if var not in ds:
@@ -1031,8 +1115,9 @@ def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = 
             else:
                 x_label = f"{utilities.get_label(var)} ({utilities.get_unit(ds, var)})"
 
+            axes = np.atleast_1d(axes).flatten()
             ax = axes[i]
-            ax.hist(data, bins=bins, alpha=0.7, color='C0', density=density)
+            ax.hist(data, bins=bins, density=density, **kwargs)
 
             ax.set_xlabel(x_label)
             ax.set_ylabel('Probability Density' if density else 'Frequency')

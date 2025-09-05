@@ -27,9 +27,9 @@ gliders:
         folder: "014/20080222"
   - name: "016"
     missions:
-      - date: 11/06
-        dives: 124
-        folder: "016/20061112"
+    ##  - date: 11/06
+    #    dives: 124
+    #    folder: "016/20061112"
       - date: 11/07
         dives: 452
         folder: "016/20071113"
@@ -41,9 +41,9 @@ gliders:
         folder: "016/20090605"
   - name: "101"
     missions:
-      - date: 11/06
-        dives: 578
-        folder: "101/20061112"
+    #  - date: 11/06
+    #    dives: 578
+    #    folder: "101/20061112"
       - date: 06/07
         dives: 453
         folder: "101/20070609"
@@ -52,9 +52,9 @@ gliders:
         folder: "101/20081108"
   - name: "102"
     missions:
-      - date: 11/06
-        dives: 630
-        folder: "102/20061112"
+      #- date: 11/06
+      #  dives: 630
+      #  folder: "102/20061112"
       - date: 06/07
         dives: 22
         folder: "no folder"

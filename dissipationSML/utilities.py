@@ -220,7 +220,8 @@ def bin_all_profiles(ds, vars, binning = None, agg='mean', dim='DEPTH',max_inter
     for var in ds_binned.data_vars:
         ds_binned[var].attrs = ds[var].attrs if var in ds else {}
     ds_binned.attrs = ds.attrs.copy()
-    ds_binned.attrs['binning'] = binning
+    ### add the binning attribute, if None, then say the mean of each profile is taken
+    ds_binned.attrs['binning'] = binning if binning is not None else 'mean of each profile'
     ds_binned.attrs['binning_method'] = agg
 
     ds_binned = ds_binned.sortby('TIME')
@@ -352,12 +353,22 @@ variable_dict = {
         "colormap": cmo.delta
     },
     "DISSIPATION_LEM_LOG": {
-        "label": "Dissipation rate (log scale)",
+        "label": r"log$_{10}(e)$",
         "units": "W kg⁻¹",
-        "colormap": cmo.delta #cm.get_cmap('jet')
+        "colormap": cmo.delta
+    },
+    "VELOCITY_SCALE_2_LOG": {
+        "label": r"log$_{10}(q²)$",
+        "units": "m s⁻¹",
+        "colormap": cmo.delta
     },
     "SORTED_N2": {
         "label": "Adiabatically sorted buoyancy frequency (N²)",
+        "units": "s⁻²",
+        "colormap": cmo.dense
+    },
+    "SORTED_N2_LOG": {
+        "label": r"log$_{10}(N²)$",
         "units": "s⁻²",
         "colormap": cmo.dense
     },
@@ -367,16 +378,16 @@ variable_dict = {
         "colormap": cmo.dense
     },
     "DISSIPATION_LEM_TOTAL": {
-        "label": "Seaglider dissipation rate (ε)",
+        "label": r"$\epsilon_{Gl}$",
         "units": "W m kg⁻¹",
-        "colormap": cmo.delta
+        "colormap": cm.get_cmap('jet')
     },
     "EPSILON_TAU": {
         "label": r"$\epsilon_\tau$",
         "units": "W m kg⁻¹",
         "colormap": cmo.delta
     },
-    "epsilon_Q": {
+    "EPSILON_Q": {
         "label": r"$\epsilon_Q$",
         "units": "W m kg⁻¹",
         "colormap": cmo.delta
@@ -390,6 +401,41 @@ variable_dict = {
         "label": "Slope dV/dp",
         "units": "m³ kg⁻¹ Pa⁻¹",
         "colormap": cmo.thermal
+    },
+    "H_S": {
+        "label": r"Stokes depth $h_s$",
+        "units": "m",
+        "colormap": cmo.deep
+    },
+    "slhf": {
+        "label": "Net surface latent heat flux",
+        "units": "W m⁻²",
+        "colormap": cm.get_cmap('coolwarm')
+    },
+    "ssr": {
+        "label": "Net surface short-wave radiation (solar)",
+        "units": "W m⁻²",
+        "colormap": cm.get_cmap('coolwarm')
+    },
+    "str": {
+        "label": "Net surface long-wave radiation (thermal)",
+        "units": "W m⁻²",
+        "colormap": cm.get_cmap('coolwarm')
+    },
+    "sshf": {
+        "label": "Net surface sensible heat flux",
+        "units": "W m⁻²",
+        "colormap": cm.get_cmap('viridis')
+    },
+    "u10": {
+        "label": "10m u wind component",
+        "units": "m/s",
+        "colormap": cm.get_cmap('viridis')
+    },
+    "v10": {
+        "label": "10m v wind component",
+        "units": "m/s",
+        "colormap": cm.get_cmap('viridis')
     },
 }
 

@@ -151,6 +151,8 @@ def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Data
     ds['VERTICAL_VELOCITY_MEASURED'] = da_w_meas
     ds['VERTICAL_WATER_VELOCITY'] = da_w_water
 
+    ds.attrs['pitch_range'] = f"{pitch_min} to {pitch_max} degrees"
+
     return ds
 
 
@@ -428,6 +430,7 @@ def LEM_dissipation(ds, c=0.37):
 
     # Compute dissipation
     velocity_scale = ds['VELOCITY_SCALE']
+    N2 = ds['SORTED_N2']
     N = ds['SORTED_N2'] ** 0.5
     dissipation = c * N * (velocity_scale ** 2)
     
@@ -450,6 +453,8 @@ def LEM_dissipation(ds, c=0.37):
         'description': "Logarithm of the dissipation rate for better visualization",
         'units': 'log10(W/kg)'
     }
+
+    ds.attrs['c_epsilon'] = c  # Store model constant in dataset attributes
 
     return ds
 
@@ -503,7 +508,7 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
 
     return mld_ds
 
-def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
+def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth = None, max_depth = None) -> xr.Dataset:
     """
     Calculate the integral of variables in the mixed layer depth (MLD) for each profile.
     Parameters
@@ -514,6 +519,8 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Datas
         Dataset containing 'MLD' and 'PROFILE_NUMBER'.
     vars : list of str
         Variable names for which to compute the MLD integral.
+    min_depth : float or array-like
+        Minimum depth to consider for integration. If an array, must match the length of profiles.
     Returns
     -------
     xarray.Dataset
@@ -525,14 +532,33 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Datas
         print(f"Calculating integral for {var}...")
         integral_values = []
         min_valid_depth = []
+        max_valid_depth = []
+        profile_numbers = mld_ds['PROFILE_NUMBER'].values
+        if min_depth is not None:
+            if isinstance(min_depth, (int, float)):
+                min_depth = np.full(len(profile_numbers), min_depth)
+            elif len(min_depth) != len(profile_numbers):
+                raise ValueError("min_depth must be a single value or match the number of profiles.")
+        else:
+            min_depth = np.zeros(len(profile_numbers))
+
+        if max_depth is not None:
+            if isinstance(max_depth, (int, float)):
+                max_depth = np.full(len(profile_numbers), max_depth)
+            elif len(max_depth) != len(profile_numbers):
+                raise ValueError("max_depth must be a single value or match the number of profiles.")
 
         for i in tqdm(range(len(mld_ds['PROFILE_NUMBER']))):
             profile_number = mld_ds['PROFILE_NUMBER'].values[i]
-            mld_depth = mld_ds['MLD'].values[i]
+            if max_depth is not None:
+                mld_depth = max_depth[i]
+            else:
+                mld_depth = mld_ds['MLD'].values[i]
 
             if np.isnan(mld_depth):
                 integral_values.append(np.nan)
                 min_valid_depth.append(np.nan)
+                max_valid_depth.append(np.nan)
                 continue
 
             # Extract variable and depth for current profile
@@ -540,7 +566,9 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Datas
 
             profile = ds.where(profile_mask, drop=True)
             # cut the profile to the MLD depth
-            profile = profile.where(profile.DEPTH <= mld_depth, drop=True)
+            min_depth_value = min_depth[i]
+
+            profile = profile.where((profile.DEPTH <= mld_depth) & (profile.DEPTH >= min_depth_value), drop=True)
 
 
             profile_var = profile[var].values
@@ -559,6 +587,7 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Datas
                 # No valid data
                 integral_values.append(np.nan)
                 min_valid_depth.append(np.nan)
+                max_valid_depth.append(np.nan)
                 continue
 
             # Interpolate internal NaNs linearly
@@ -567,15 +596,18 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Datas
             if len(var_trimmed[~msk]) < 2:
                 integral_values.append(np.nan)
                 min_valid_depth.append(np.nan)
+                max_valid_depth.append(np.nan)
                 continue
             var_interp = np.interp(depth_trimmed, depth_trimmed[~msk], var_trimmed[~msk], left=np.nan, right=np.nan)
 
             integral_value = trapezoid(var_interp, depth_trimmed)
             integral_values.append(integral_value)
-            min_valid_depth.append(depth_trimmed[0])
+            min_valid_depth.append(np.min(depth_trimmed))
+            max_valid_depth.append(np.max(depth_trimmed))
 
         mld_ds[var + '_TOTAL'] = ('TIME', integral_values)
         mld_ds[var + '_MIN_DEPTH'] = ('TIME', min_valid_depth)
+        mld_ds[var + '_MAX_DEPTH'] = ('TIME', max_valid_depth)
 
     return mld_ds
 
@@ -1050,7 +1082,7 @@ def cut_region(ds: xr.Dataset,region: rm.Regions):
     return ds_region
 
 
-def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None):
+def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None, time_lag = None, time_range = None):
     """
     Match ERA5 data to MLD observations based on time, longitude, and latitude. 
     ERA5 values are averaged over a spatial range (if provided) and matched by nearest time.
@@ -1065,6 +1097,10 @@ def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None):
         Longitude range (in degrees) for spatial averaging. If None, uses nearest longitude.
     lat_range : float or None, optional
         Latitude range (in degrees) for spatial averaging. If None, uses nearest latitude.
+    time_lag: float
+        Take the profile time minus a time_lag [hours] for the matching of the ERA5 data.
+    time_range: float
+        Takes a time range [hours], in which the ERA5 data is averaged.
 
     Returns
     -------
@@ -1075,6 +1111,9 @@ def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None):
     lons = ds_mld.LONGITUDE.values
     lats = ds_mld.LATITUDE.values
 
+    if time_lag:
+        times = times - np.timedelta64(time_lag,"h")
+
     matched_profiles = []
 
     for i in tqdm(range(len(times)), desc="Matching ERA5 to MLD"):
@@ -1082,19 +1121,23 @@ def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None):
         lon = lons[i]
         lat = lats[i]
 
-        # Select nearest ERA5 time
-        match = ds_era5.sel(valid_time=time, method="nearest")
+        if time_range:
+            match = ds_era5.sel(valid_time=slice(time, time+np.timedelta64(time_range,'h')))
+            match = match.mean(dim=["valid_time"], skipna=True, keep_attrs=True)
+        else:
+            # Select nearest ERA5 time
+            match = ds_era5.sel(valid_time=time, method="nearest")
 
         # Apply spatial window if specified
         if lon_range:
             match = match.sel(longitude=slice(lon - lon_range, lon + lon_range))
         else:
-            match = match.sel(longitude=lon, method="nearest")
+            match = match.sel(longitude=slice(lon))
 
         if lat_range:
             match = match.sel(latitude=slice(lat - lat_range, lat + lat_range))
         else:
-            match = match.sel(latitude=lat, method="nearest")
+            match = match.sel(latitude=slice(lat))
 
         # Compute spatial mean and assign timestamp
         match = match.mean(dim=["latitude", "longitude"], skipna=True, keep_attrs=True)
@@ -1112,6 +1155,7 @@ def match_era5_to_mld(ds_mld, ds_era5, lon_range=None, lat_range=None):
     # Store matching settings as metadata
     ds_mld.attrs["longitude_range_used"] = f"±{lon_range}°" if lon_range else "Nearest longitude"
     ds_mld.attrs["latitude_range_used"] = f"±{lat_range}°" if lat_range else "Nearest latitude"
+    ds_mld.attrs["time_lag"] = f"{time_lag} hours" if time_lag else "Nearest point in time"
 
     return ds_mld
 
@@ -1136,10 +1180,10 @@ def add_buoyancy_flux(ds:xr.Dataset, c_p=4e3, g=9.81, L=2.5e6):
     xarray.Dataset
         Dataset with buoyancy flux added.
     """
-    Q_SW = ds['ssr']/3600 # net shortwave radiation in W/m2
-    Q_LW = ds['str']/3600 # net longwave radiation in W/m2
-    Q_LH = ds['slhf']/3600 # net latent heat flux in W/m2
-    Q_SH = ds['sshf']/3600 # net sensible heat flux in W/m2
+    Q_SW = ds['ssr'] # net shortwave radiation in W/m2
+    Q_LW = ds['str'] # net longwave radiation in W/m2
+    Q_LH = ds['slhf'] # net latent heat flux in W/m2
+    Q_SH = ds['sshf'] # net sensible heat flux in W/m2
     Q_0 = Q_SW + Q_LW + Q_LH + Q_SH # net surface heat flux
     
     E = ds['e'] # evaporation
@@ -1182,9 +1226,9 @@ def dissipation_bouyancy_flux(ds):
     
     # Calculate dissipation rate based on buoyancy flux for all positive values of B_0
     B_0 = ds['B_0']
-    B_0 = B_0.where(B_0 > 0 , 0)  # Set negative values to zero
+    #B_0 = B_0.where(B_0 > 0 , np.nan)  # Set negative values to zero
     MLD = ds['MLD']
-    ds['epsilon_Q'] = 1/2 * MLD * B_0
+    ds['EPSILON_Q'] = 1/2 * MLD * B_0
     
     return ds
 
@@ -1203,7 +1247,7 @@ def add_u_star(ds):
         Dataset with u_star added.
     """
     
-    tau = ds['tau']  # Wind stress [N/m^2]
+    tau = ds['TAU']  # Wind stress [N/m^2]
     rho = ds['SIGTHETA_MEAN']  # Density [kg/m^3]
     
     # Calculate friction velocity
@@ -1232,6 +1276,7 @@ def add_hs(ds):
     c_bar = 0.1*c_p # effective wave speed [m/s], based on Buckingham 2019
 
     swh = ds['swh'] # significant wave height [m]
+    add_u_star(ds)  # Ensure u_star is calculated and added to the dataset
     u_star = ds['U_STAR'] # friction velocity from wind stress (ERA-5) [m/s]‚
 
     # Calculate the transition depth
@@ -1261,23 +1306,114 @@ def dissipation_wind_stress(ds):
     
     # Extract variables from dataset
     MLD = ds['MLD']             # Mixed layer depth [m]
-    tau = ds['tau']             # Wind stress [N/m^2]
+    tau = ds['TAU']             # Wind stress [N/m^2]
     rho = ds['SIGTHETA_MEAN']   # Density [kg/m^3]
     min_depth = ds['DISSIPATION_LEM_MIN_DEPTH']  # Minimum depth for dissipation calculation [m]
+    max_depth = ds['DISSIPATION_LEM_MAX_DEPTH']  # Maximum depth for dissipation calculation [m]
     print(min_depth)
-    
 
     # Physical constant
     kappa = 0.4  # Von Karman constant
-    #u_star = ds['u_star']  # Friction velocity [m/s]
-    #U_STAR = ds['U_STAR']  # Friction velocity from bulk formula [m/s]
     U_STAR = np.sqrt(tau/rho)
     # Compute epsilon_tau using conditional logic
-    # Where h_s > MLD, epsilon_tau = nan; else compute full expression
    
-    EPSILON_TAU = xr.where(min_depth > MLD , 0 , 
-                           (U_STAR ** 3) / kappa * np.log(MLD / min_depth))
-    #ds['epsilon_tau'] = epsilon_tau
+    EPSILON_TAU = xr.where(min_depth > max_depth , np.nan , 
+                           (U_STAR ** 3) / kappa * np.log(max_depth / min_depth))
     ds['EPSILON_TAU'] = EPSILON_TAU
     
     return ds
+
+def get_background_dissipation(ds, profile_range=[0, -1], depth_range=[200, 400], sg005_ds=None):
+    """
+    Calculate the background dissipation from the dataset and optionally compare with sg005_ds.
+    
+    Parameters:
+    - ds: xarray Dataset
+    - profile_range: List [start, end] of profile numbers
+    - depth_range: List [min_depth, max_depth]
+    - sg005_ds: Optional xarray Dataset to compare
+    
+    Returns:
+    - Tuple: (background_sg005, ds_background) if sg005_ds provided, else (None, ds_background)
+    """
+    
+    def cut_background(ds, profile_range, depth_range):
+        return ds.where(
+            (ds.PROFILE_NUMBER >= profile_range[0]) &
+            (ds.PROFILE_NUMBER <= profile_range[1]) &
+            (ds.DEPTH >= depth_range[0]) &
+            (ds.DEPTH <= depth_range[1]),
+            drop=True
+        )
+
+    def plot_hist(ax, ds, median=None, mean=None, color='blue'):
+        figh, axh = plotting.plot_histogram(
+            ds, vars=['DISSIPATION_LEM'], bins=50, log_scale=True, density=True,
+            alpha=0.2, color=color, edgecolor='black', ax=ax
+        )
+        unit = utilities.get_unit(ds, 'DISSIPATION_LEM')
+        if mean is not None:
+            ax.axvline(np.log10(mean), color=color, linestyle='--', label=f'Mean = {mean:.2e} [{unit}]')
+        if median is not None:
+            ax.axvline(np.log10(median), color=color, linestyle=':', label=f'Median = {median:.2e} [{unit}]')
+        ax.set_title(f'Background Dissipation Histogram of sg{ds.Glider +'/'+ ds.Mission} (c = {ds.c_epsilon})')
+        ax.legend()
+        return ax
+
+    ds_background = cut_background(ds, profile_range, depth_range)
+    mean_bg = np.nanmean(ds_background['DISSIPATION_LEM'].values)
+    median_bg = np.nanmedian(ds_background['DISSIPATION_LEM'].values)
+
+    background_sg005 = None
+
+    mean_ratio, median_ratio, ratio_total = None, None, None
+
+    if sg005_ds is None:
+        # Just one histogram
+        fig, ax = plt.subplots(figsize=(8, 5))
+        plot_hist(ax, ds_background, median_bg, mean_bg, color='blue', label='Background')
+    else:
+        # Load ranges and cut sg005 dataset
+        profile_range_005 = bg_yaml['sg005']['005/20080606']['profile_range']
+        depth_range_005 = bg_yaml['sg005']['005/20080606']['depth_range']
+        background_sg005 = cut_background(sg005_ds, profile_range_005, depth_range_005)
+
+        mean_005 = np.nanmean(background_sg005['DISSIPATION_LEM'].values)
+        median_005 = np.nanmedian(background_sg005['DISSIPATION_LEM'].values)
+
+        # Create combined figure with 3 subplots
+        fig, axs = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+
+        # Subplot 1: original dataset
+        axs[0].set_title(f'Background Dissipation Histogram of {ds.id.split("T")[0]} (c = {ds.c_epsilon})')
+        plot_hist(axs[0], ds_background, median_bg, mean_bg, color='blue')
+
+        # Subplot 2: sg005 dataset
+        axs[1].set_title(f'Background Dissipation Histogram of {sg005_ds.id.split("T")[0]} (c = {sg005_ds.c_epsilon})')
+        plot_hist(axs[1], background_sg005, median_005, mean_005, color='red')
+
+        # Subplot 3: comparison
+        plotting.plot_histogram(ds_background, vars=['DISSIPATION_LEM'], bins=50, log_scale=True, density=True,
+                                 alpha=0.2, color='blue', edgecolor='darkblue', ax=axs[2])
+        plotting.plot_histogram(background_sg005, vars=['DISSIPATION_LEM'], bins=50, log_scale=True, density=True,
+                                 alpha=0.2, color='red', edgecolor='darkred', ax=axs[2])
+        axs[2].set_title('Comparison of Background Dissipation Histograms')
+        axs[2].legend(['sg' + ds_background.Glider + '/' + ds_background.Mission, 'sg005/20080606'])
+
+        c_005 = bg_yaml['sg005']['005/20080606']['c']
+        mean_ratio = mean_005 / mean_bg
+        c_mean = c_005 * mean_ratio
+        median_ratio = median_005 / median_bg
+        c_median = c_005 * median_ratio
+        ratio_total = (mean_ratio + median_ratio) / 2
+        c_total = c_005 * ratio_total
+
+        print(f'Mean ratio (sg005/Background): {mean_ratio:.3f}, c = {c_mean:.3f}')
+        print(f'Median ratio (sg005/Background): {median_ratio:.3f}, c = {c_median:.3f}')
+        print(f'Average ratio (sg005/Background): {ratio_total:.3f}, c = {c_total:.3f}')
+
+    # Show section plot
+    figs, section_axs = plotting.plot_section(ds_background, vars=['SORTED_N2', 'VELOCITY_SCALE_2_LOG', 'DISSIPATION_LEM_LOG'], v_res=2)
+    plt.show()
+
+    return mean_ratio, median_ratio, ratio_total
