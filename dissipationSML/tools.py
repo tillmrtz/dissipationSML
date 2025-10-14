@@ -259,17 +259,19 @@ def add_adiabatic_sorted_N2(ds, plev = 20):
     dims = list(ds.dims.keys())[0]
 
     SORTED_N2_da = xr.DataArray(df['SORTED_N2'].to_numpy(), dims=dims, attrs={
-        'long_name': 'Adiabatically sorted Brunt-Väisälä frequency squared',
+        'long_name': 'Adiabatically sorted N²',
         'units': '1/s^2',
         'plev': plev})
     
-    ALPHA_1_da = xr.DataArray(df['ALPHA_1'].to_numpy(), dims=dims, attrs={
-        'long_name': 'dV/dP slope',
-        'units': 'm^3/kg/Pa',
+    SORTED_N_da = xr.DataArray(df['SORTED_N2'].to_numpy()**0.5, dims=dims, attrs={
+        'long_name': 'Adiabatically sorted N',
+        'units': '1/s',
         'plev': plev})
 
     ds['SORTED_N2'] = SORTED_N2_da
-    ds['ALPHA_1'] = ALPHA_1_da
+    ds['SORTED_N'] = SORTED_N_da
+    ds['SORTED_N2_LOG'] = np.log10(SORTED_N2_da)
+    ds['SORTED_N_LOG'] = np.log10(SORTED_N_da)
 
     return ds
 
@@ -521,6 +523,8 @@ def integrate_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list, min_depth =
         Variable names for which to compute the MLD integral.
     min_depth : float or array-like
         Minimum depth to consider for integration. If an array, must match the length of profiles.
+    max_depth : float or array-like
+        Maximum depth to consider for integration. If an array, must match the length of profiles.
     Returns
     -------
     xarray.Dataset
@@ -673,7 +677,7 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
         wn = fc / (fs / 2)
         b, a = butter(order, wn, btype='high')
 
-        binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE'], binning=None, dim='TIME',max_interval = max_interval)
+        binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE','SIGMA_T'], binning=None, dim='TIME',max_interval = max_interval)
         signal = binned_df[var].values
 
         profile_filtered = np.full_like(signal, np.nan)
@@ -842,6 +846,11 @@ def mld_profile_treshhold(profile, variable: str = 'SIGMA_T', threshold: float =
     # Sort by depth
     sort_idx = np.argsort(depth)
     depth, density = depth[sort_idx], density[sort_idx]
+
+    # check if any depth is below ref_depth
+    if np.nanmin(depth) > ref_depth:
+        print(f"No depth data below reference depth {ref_depth} m")
+        return np.nan
 
     # Estimate density at reference depth
     if ref_depth in depth:
@@ -1072,12 +1081,12 @@ def cut_region(ds: xr.Dataset,region: rm.Regions):
     -------
     ds_region: xarray dataset containing the data only in the specified region
     """
-    if "langitude" in ds.coords:
+    if "longitude" in ds.coords:
         region_mask = region.mask(ds.longitude,ds.latitude)
 
     else:
         region_mask = region.mask(ds.LONGITUDE, ds.LATITUDE)
-        ds_region = ds.isel(N_MEASUREMENTS=region_mask == 0)
+        ds_region = ds.isel(TIME=region_mask == 0)
 
     return ds_region
 
@@ -1201,7 +1210,7 @@ def add_buoyancy_flux(ds:xr.Dataset, c_p=4e3, g=9.81, L=2.5e6):
     ds['B_0'] = B_0
     return ds
 
-def dissipation_bouyancy_flux(ds):
+def dissipation_bouyancy_flux(ds, MLD = None):
     """
     Add surface buoyancy flux to the dataset based on the surface heat fluxes.
 
@@ -1215,6 +1224,8 @@ def dissipation_bouyancy_flux(ds):
         Gravitational acceleration (default is 9.81 m/s^2).
     L : float, optional
         Latent heat of vaporization (default is 2.5e6 J/kg).
+    MLD : array-like, optional
+        Mixed layer depth to use for dissipation calculation. If None, uses 'MLD' from ds.
     
     Returns
     -------
@@ -1227,7 +1238,8 @@ def dissipation_bouyancy_flux(ds):
     # Calculate dissipation rate based on buoyancy flux for all positive values of B_0
     B_0 = ds['B_0']
     #B_0 = B_0.where(B_0 > 0 , np.nan)  # Set negative values to zero
-    MLD = ds['MLD']
+    if MLD is None:
+        MLD = ds['MLD']  # Mixed layer depth [m]
     ds['EPSILON_Q'] = 1/2 * MLD * B_0
     
     return ds
@@ -1272,15 +1284,16 @@ def add_hs(ds):
     g = 9.81 # gravitational acceleration [m/s^2]
     kappa = 0.4 # von Karman constant 
     T = ds['pp1d'] # peak wave period [s]
+    u_star_wind = ds['zust'] # wind friction velocity [m/s]
     c_p = g*T/(2*np.pi) # phase speed of peak wave [m/s]
-    c_bar = 0.1*c_p # effective wave speed [m/s], based on Buckingham 2019
+    #c_bar = 0.1*c_p # effective wave speed [m/s], based on Buckingham 2019
 
     swh = ds['swh'] # significant wave height [m]
     add_u_star(ds)  # Ensure u_star is calculated and added to the dataset
-    u_star = ds['U_STAR'] # friction velocity from wind stress (ERA-5) [m/s]‚
+    #u_star = ds['U_STAR'] # friction velocity from wind stress (ERA-5) [m/s]‚
 
     # Calculate the transition depth
-    h_s = 0.3 * kappa * swh * c_bar/u_star
+    h_s = 0.38 * swh * c_p/u_star_wind
 
     ds['H_S'] = h_s
 
@@ -1310,7 +1323,7 @@ def dissipation_wind_stress(ds):
     rho = ds['SIGTHETA_MEAN']   # Density [kg/m^3]
     min_depth = ds['DISSIPATION_LEM_MIN_DEPTH']  # Minimum depth for dissipation calculation [m]
     max_depth = ds['DISSIPATION_LEM_MAX_DEPTH']  # Maximum depth for dissipation calculation [m]
-    print(min_depth)
+    #print(min_depth)
 
     # Physical constant
     kappa = 0.4  # Von Karman constant

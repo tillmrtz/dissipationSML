@@ -358,8 +358,8 @@ variable_dict = {
         "colormap": cmo.delta
     },
     "VELOCITY_SCALE_2_LOG": {
-        "label": r"log$_{10}(q²)$",
-        "units": "m s⁻¹",
+        "label": r"log$_{10}(σ_{w}²)$",
+        "units": "m² s⁻²",
         "colormap": cmo.delta
     },
     "SORTED_N2": {
@@ -367,10 +367,15 @@ variable_dict = {
         "units": "s⁻²",
         "colormap": cmo.dense
     },
+    "SORTED_N_LOG": {
+        "label": r"log$_{10}(N)$",
+        "units": "s⁻¹",
+        "colormap": cmo.delta
+    },
     "SORTED_N2_LOG": {
         "label": r"log$_{10}(N²)$",
         "units": "s⁻²",
-        "colormap": cmo.dense
+        "colormap": cmo.delta
     },
     "ADIABATIC_N2": {
         "label": "Adiabatic buoyancy frequency (N²)",

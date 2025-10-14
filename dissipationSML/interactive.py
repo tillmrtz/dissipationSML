@@ -80,7 +80,7 @@ def interactive_glider_selection(yaml_path):
     
     return path_output
 
-def interactive_profile(ds):
+def interactive_profile(ds, mld_df=None):
     """
     Creates an interactive profile viewer with external slider inputs.
 
@@ -103,6 +103,12 @@ def interactive_profile(ds):
     def plot_func(profile_num, var1, var2, var3, use_bins, binning):
         vars = [var1, var2, var3]
         fig, ax = plot_profile(ds, profile_num, vars, use_bins, binning)
+        if mld_df is not None:
+            MLD = mld_df[mld_df['PROFILE_NUMBER'] == profile_num]['MLD'].values[0]
+            ### plot MLD line
+            if not np.isnan(MLD):
+                ax.axhline(MLD, color='black', linestyle='--', label=f'MLD ({MLD:.2f} m)')
+                ax.legend()
         display(fig)
         plt.close(fig)
         del fig, ax

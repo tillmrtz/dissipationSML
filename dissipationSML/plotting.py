@@ -18,6 +18,7 @@ importlib.reload(utilities)
 import matplotlib.cm as cm
 from scipy.interpolate import interp1d
 importlib.reload(utilities)
+import matplotlib.ticker as mticker
 
 
 import regionmask as rm
@@ -55,106 +56,153 @@ def get_bathymetry_levels(bath, level_spacing=250):
         contour_levels = levels[::2]  # Every second level
         return levels, contour_levels, max_level
 
-def plot_glider_track(ds: xr.Dataset, mean_profile = False, ax: plt.Axes = None, **kw: dict):
+def plot_glider_track(ds, mean_after="Profile", ax=None, **kw):
     """
-    This function plots the glider track on a map, with latitude and longitude colored by time. Contour lines are added to the plot.
+    Plot glider track(s) on a map.
+
+    If ds is a single Dataset: scatter is colored by TIME.
+    If ds is a list of Datasets: each dataset is one mission, colored by mission.
 
     Parameters
     ----------
-    ds: xarray.Dataset
-        Dataset with variables ** LATITUDE, LONGITUDE** and **TIME**
-    ax: matplotlib.axes.Axes, default = None
-        Existing Axes that the data should plotted to. 
-    **kw: Optional; additional keyword arguments for the scatter plot.
+    ds : xarray.Dataset or list of xarray.Dataset
+        Dataset(s) with LATITUDE, LONGITUDE, TIME, GLIDER, MISSION.
+    mean_after : {"Profile", "Cast", "None"}, default="Profile"
+        Whether to average lat/lon/time per profile, per cast, or use raw values.
+    ax : matplotlib.axes.Axes, optional
+        Axis to plot on. If None, a new figure/axis is created.
+    **kw : dict
+        Extra keyword arguments passed to ax.scatter.
 
     Returns
     -------
-    fig: matplotlib.figure.Figure
-        The figure object containing the plot.
-    ax: matplotlib.axes.Axes
-        The axis object containing the primary plot.
-    
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
     """
-    ## if dim is PROFILE_NUMBER, just take latitude, longitude and time values directly
-    if mean_profile:
-        # Extract profile mean values
-        latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-        longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
-        times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
+
+    map_kw = ccrs.PlateCarree()
+
+    if ax is None:
+        fig, ax = plt.subplots(subplot_kw={"projection": map_kw}, figsize=(12, 8))
     else:
-        #Extract profile values directly
-        latitudes = ds.LATITUDE.values
-        longitudes = ds.LONGITUDE.values
-        times = ds.TIME.values
+        fig = ax.get_figure()
+        # If provided axis has no Cartopy projection, replace it
+        if not hasattr(ax, 'projection'):
+            # Remember position and remove old one
+            pos = ax.get_position()
+            ax.remove()
+            ax = fig.add_axes(pos, projection=ccrs.PlateCarree())
 
-        # Define bounding box
-        lon_min, lon_max = -15, -6
-        lat_min, lat_max = 60, 65
+    # Define bounding box
+    lon_min, lon_max = -15, -6
+    lat_min, lat_max = 60, 65
 
-        # Calculate aspect-corrected figsize
-        mean_lat_rad = np.deg2rad((lat_min + lat_max) / 2)
-        delta_lat = lat_max - lat_min
-        delta_lon = lon_max - lon_min
-        width = delta_lon * np.cos(mean_lat_rad)
-        height = delta_lat
+    ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=map_kw)
+    ax.set_aspect("auto")
 
-        # Choose a scaling factor
-        scale = 4  # This just determines overall size
+    # Bathymetry (assuming bathymetry is global variable)
+    bath = bathymetry.sel(lon=slice(lon_min, lon_max), lat=slice(lat_min, lat_max))
+    levels, contour_levels, max_level = get_bathymetry_levels(bath)
 
-        figsize = (width * scale, height * scale)
+    cmap_bath = plt.get_cmap("Blues", len(levels))
 
-        # Create figure and axis if needed
-        if ax is None:
-            fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()}, figsize=figsize)
+    pcm = ax.pcolormesh(
+        bath.lon, bath.lat, abs(bath.elevation.values),
+        cmap=cmap_bath, vmin=0, vmax=max_level, transform=map_kw
+    )
+    ax.contour(
+        bath.lon, bath.lat, abs(bath.elevation.values),
+        levels=contour_levels, colors="black", linewidths=0.5, transform=map_kw
+    )
+
+    # Single dataset → color by TIME
+    if isinstance(ds, xr.Dataset):
+        if mean_after == "Profile":
+            latitudes = ds.LATITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+            longitudes = ds.LONGITUDE.groupby(ds.PROFILE_NUMBER).mean().values
+            times = ds.TIME.groupby(ds.PROFILE_NUMBER).mean().values
+        elif mean_after == "Cast":
+            latitudes = ds.LATITUDE.groupby(ds.CAST).mean().values
+            longitudes = ds.LONGITUDE.groupby(ds.CAST).mean().values
+            times = ds.TIME.groupby(ds.CAST).mean().values
         else:
-            fig = plt.gcf()
+            latitudes = ds.LATITUDE.values
+            longitudes = ds.LONGITUDE.values
+            times = ds.TIME.values
 
-        # Set map extent
-        ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
+        sc = ax.scatter(longitudes, latitudes, c=times, cmap="inferno", s=10, marker="o", **kw)
 
-        # Load bathymetry (you'll need to define `bathymetry` before calling this function)
-        bath = bathymetry.sel(lon=slice(lon_min, lon_max), lat=slice(lat_min, lat_max))
+        # Time colorbar
+        cbar = plt.colorbar(sc, ax=ax, pad=0.01, shrink=1)
+        cbar.ax.set_yticklabels([pd.to_datetime(t).strftime("%Y-%b-%d") for t in cbar.get_ticks()])
 
-        # Compute bathymetry levels
-        levels, contour_levels, max_level = get_bathymetry_levels(bath)
+    # List of datasets → color by mission
+    elif isinstance(ds, list):
+        def mission_label(dsi):
+            return f"{dsi['GLIDER'].values[0]}/{dsi['MISSION'].values[0]}"
 
-        # Plot bathymetry as color mesh
-        cmap = plt.get_cmap('Blues', len(levels))
-        pcm = ax.pcolormesh(
-            bath.lon, bath.lat, abs(bath.elevation.values), 
-            cmap=cmap, vmin=0, vmax=max_level, transform=ccrs.PlateCarree())
+        # Build (label, date) pairs
+        mission_info = []
+        for dsi in ds:
+            label = mission_label(dsi)
+            date = pd.to_datetime(dsi.TIME.min().values)  # mission start time
+            mission_info.append((label, date))
 
-        # Plot bathymetry contour lines
-        ax.contour(
-            bath.lon, bath.lat, abs(bath.elevation.values), 
-            levels=contour_levels, colors='black', linewidths=0.5, transform=ccrs.PlateCarree())
+        # Sort missions by date
+        mission_info = sorted(mission_info, key=lambda x: x[1])
+        mission_labels = [lab for lab, _ in mission_info]
 
-        # Plot glider track (colored by time)
-        sc = ax.scatter(longitudes, latitudes, c=times, cmap='inferno', s=10, **kw)
+        # Colormap
+        mission_cmap = cm.get_cmap("inferno", len(mission_labels))
+        mission_color_dict = {lab: mission_cmap(i) for i, lab in enumerate(mission_labels)}
 
-        # Colorbar for time (formatted date labels)
-        cbar = plt.colorbar(sc, ax=ax,pad = 0.01, shrink = 0.3)
-        cbar.ax.set_yticklabels([pd.to_datetime(t).strftime('%Y-%b-%d') for t in cbar.get_ticks()])
+        # Plot each mission
+        for dsi, (label, _) in zip(ds, mission_info):
+            if mean_after == "Profile":
+                latitudes = dsi.LATITUDE.groupby(dsi.PROFILE_NUMBER).mean().values
+                longitudes = dsi.LONGITUDE.groupby(dsi.PROFILE_NUMBER).mean().values
+            elif mean_after == "Cast":
+                latitudes = dsi.LATITUDE.groupby(dsi.CAST).mean().values
+                longitudes = dsi.LONGITUDE.groupby(dsi.CAST).mean().values
+            else:
+                latitudes = dsi.LATITUDE.values
+                longitudes = dsi.LONGITUDE.values
 
-        # Colorbar for bathymetry
-        cbar_bath = plt.colorbar(pcm, ax=ax, label='Depth (m)', pad=0.01, shrink=0.3)
-        cbar_bath.set_ticks(levels)
+            ax.scatter(
+                longitudes, latitudes,
+                color=mission_color_dict[label], s=10, marker="o", label=label, **kw
+            )
 
-        # Add map features
-        ax.add_feature(cfeature.LAND, color='lightgray', zorder=10)
-        ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=11)
+        # Colorbar with mission order by date
+        norm = mcolors.BoundaryNorm(np.arange(len(mission_labels) + 1) - 0.5, mission_cmap.N)
+        sm = plt.cm.ScalarMappable(cmap=mission_cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(
+            sm, ax=ax, pad=0.01, shrink=1, ticks=np.arange(len(mission_labels))
+        )
+        cbar.ax.set_yticklabels(mission_labels)
 
-        # Labels and title
-        ax.set_xlabel('Longitude')
-        ax.set_ylabel('Latitude')
-        ax.set_title('Glider Track with Bathymetry')
+    # Bathymetry colorbar
+    cbar_bath = plt.colorbar(pcm, ax=ax, label="Depth (m)", pad=0.01, shrink=1)
+    cbar_bath.set_ticks(levels)
 
-        # Gridlines
-        gl = ax.gridlines(draw_labels=True, color='black', alpha=0.5, linestyle='--')
-        gl.top_labels = False
-        gl.right_labels = False
+    # Features
+    ax.add_feature(cfeature.LAND, color="lightgray", zorder=10)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, zorder=11)
+
+    # Labels & title
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title("Glider Track with Bathymetry")
+
+    # Gridlines with custom ticks
+    gl = ax.gridlines(draw_labels=True, color="black", alpha=0.5, linestyle="--")
+    gl.xlocator = mticker.FixedLocator([-14, -12, -10, -8, -6])
+    gl.top_labels = False
+    gl.right_labels = False
 
     return fig, ax
+
 
 def plot_profile(ds: xr.Dataset, profile_num: int, vars: list = ['TEMP','PSAL','SIGMA_T'], use_bins: bool = False, binning: float = 2,ax = None) -> tuple:
     """
@@ -401,7 +449,7 @@ def plot_scatter(ds, vars=['PSAL', 'TEMP', 'DENSITY'], start=None, end=None, mld
 
     return fig, ax
 
-def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=None, mld_df = None):
+def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=None, mld_df = None, levels=None, ax = None):
     """
     Plots a section of the dataset with PROFILE_NUMBER on the x-axis, DEPTH on the y-axis,
     and mean TIME per profile as secondary x-axis (automatically spaced).
@@ -420,6 +468,10 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
         End PROFILE_NUMBER (inclusive).
     mld_df : pd.DataFrame
         MLD as a pandas Dataframe, which is the result of the MLD calculation compute_mld(). The dataframe should contain the profile number, MLD and the mean time profile.
+    levels : None, bool, or list/array
+        - None (default): continuous colormap (pcolormesh).
+        - True: use 10 equally spaced discrete levels (rounded to 1 decimal).
+        - list/array of floats: use exactly these levels (non-uniform spacing honored).
 
     Returns
     -------
@@ -450,103 +502,154 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
         if mld_df is not None:
             mld_df = mld_df[(mld_df['PROFILE_NUMBER'] >= start) & (mld_df['PROFILE_NUMBER'] <= end)]
 
-    num_vars = len(vars)
-    fig, ax = plt.subplots(num_vars, 1, figsize=(20, 7 * num_vars), sharex=True, gridspec_kw={'height_ratios': [8] * num_vars})
-    images = []
-    if num_vars == 1:
-        ax = [ax]
+    with plt.style.context(plotting_style):
+        num_vars = len(vars)
 
-    x_plot = ds['PROFILE_NUMBER'].values
-
-    has_density_plot = any(utilities.get_colormap(var) == cmo.dense for var in vars)
-
-    # Compute mean time per profile
-    df_time = ds[['TIME', 'PROFILE_NUMBER']].to_dataframe().dropna()
-    if df_time.index.name == 'TIME':
-        df_time = df_time.reset_index()
-    mean_times = df_time.groupby('PROFILE_NUMBER')['TIME'].mean()
-
-    for i, var in enumerate(vars):
-        if var not in ds:
-            raise ValueError(f'Variable "{var}" not found in dataset.')
-
-        values = ds[var].values
-        depth = ds['DEPTH'].values
-
-        p = 1
-        z = v_res
-
-        varG, profG, depthG = utilities.construct_2dgrid(x_plot, depth, values, p, z, x_bin_center=False)
-
-        cmap = utilities.get_colormap(var)
-        if cmap == cmo.delta and np.any(values < 0) and np.any(values > 0):
-            norm = mcolors.TwoSlopeNorm(
-                vmin=np.nanpercentile(values, 0.5),
-                vcenter=0,
-                vmax=np.nanpercentile(values, 99.5)
-            )
-            im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, norm=norm)
-            images.append(im)
+        # --- Handle provided axes ---
+        if ax is not None:
+            # Ensure ax is iterable
+            if not isinstance(ax, (list, np.ndarray)):
+                ax = [ax]
+            if len(ax) != num_vars:
+                raise ValueError(f"Number of provided axes ({len(ax)}) does not match number of variables ({num_vars}).")
+            fig = ax[0].get_figure()
         else:
-            im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap,
-                                  vmin=np.nanpercentile(values, 0.5),
-                                  vmax=np.nanpercentile(values, 99.5))
-            images.append(im)
-        if mld_df is not None:
-            if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
-                ax[i].plot(mld_df['PROFILE_NUMBER'], mld_df['MLD'], color='black', marker='o', linewidth=1,
-                           label='Mixed Layer Depth', markersize=2)
-                ax[i].legend(loc='upper left', fontsize=8)
+            # Create new figure and axes if none provided
+            fig, ax = plt.subplots(
+                num_vars, 1,
+                figsize=(20, 7 * num_vars),
+                sharex=True,
+                gridspec_kw={'height_ratios': [8] * num_vars}
+            )
+            if num_vars == 1:
+                ax = [ax]
 
-        unit = utilities.get_unit(ds, var)
-        label = utilities.get_label(var)
+        images = []
 
-        total_profiles = x_plot[-1] - x_plot[0]
-        ax[i].invert_yaxis()
-        ax[i].set_ylabel('Depth (m)')
-        ax[i].grid(True)
-        ax[i].set_title(f'Section plot of {label}')
-        ax[i].set_xlim(np.min(x_plot)-total_profiles/50, np.max(x_plot)+total_profiles/50)
 
-        cbar = plt.colorbar(im, ax=ax[i], pad=0.03)
-        cbar.set_label(f'{label} [{unit}]', labelpad=20, rotation=270)
+        x_plot = ds['PROFILE_NUMBER'].values
 
-    # Main x-axis: profile numbers
-    ax[-1].set_xlabel('Profile Number')
+        has_density_plot = any(utilities.get_colormap(var) == cmo.dense for var in vars)
 
-    # Get mean time per profile (datetime) and profile numbers
-    times = pd.to_datetime(mean_times)
-    profiles = mean_times.index.values
-    time_nums = mdates.date2num(times)  # matplotlib float format for dates
+        # Compute mean time per profile
+        df_time = ds[['TIME', 'PROFILE_NUMBER']].to_dataframe().dropna()
+        if df_time.index.name == 'TIME':
+            df_time = df_time.reset_index()
+        mean_times = df_time.groupby('PROFILE_NUMBER')['TIME'].mean()
 
-    # Build interpolators
-    to_time = interp1d(profiles, time_nums, bounds_error=False, fill_value="extrapolate")
-    to_profile = interp1d(time_nums, profiles, bounds_error=False, fill_value="extrapolate")
+        for i, var in enumerate(vars):
+            if var not in ds:
+                raise ValueError(f'Variable "{var}" not found in dataset.')
 
-    # Create a transform that maps profile numbers → time for the secondary x-axis
-    def forward(x):
-        return to_time(x)
+            values = ds[var].values
+            depth = ds['DEPTH'].values
 
-    def inverse(x):
-        return to_profile(x)
+            p = 1
+            z = v_res
 
-    # Create the secondary axis (top), linked to the bottom profile axis
-    time_ax = ax[-1].secondary_xaxis("bottom", functions=(forward, inverse))
-    time_ax.set_xlabel("Mean Time per Profile")
-    time_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    time_delta = time_nums[-1] - time_nums[0]
-    if time_delta < 5:
-        time_ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
-    else:
-        time_ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    
-    time_ax.spines['bottom'].set_position(('outward', 40))
-    time_ax.tick_params(rotation=35)
+            varG, profG, depthG = utilities.construct_2dgrid(x_plot, depth, values, p, z, x_bin_center=False)
+
+            cmap = utilities.get_colormap(var)
+
+            vmin = np.nanpercentile(values, 0.5)
+            vmax = np.nanpercentile(values, 99.5)
+
+            # --- Levels handling and validation ---
+            levs = None
+            if isinstance(levels, (list, np.ndarray)):
+                levs = np.asarray(levels, dtype=float)
+                levs = np.unique(np.sort(levs))   # sort & remove duplicates
+                if levs.size < 2:
+                    raise ValueError("levels must contain at least two distinct values.")
+            elif levels is True:
+                # 10 evenly spaced rounded levels (one decimal)
+                if np.isfinite(vmin) and np.isfinite(vmax) and (vmax > vmin):
+                    levs = np.round(np.linspace(vmin, vmax, 10), 2)
+                    levs = np.unique(levs)
+                    if levs.size < 2:
+                        # fallback if rounding collapsed values
+                        levs = np.array([vmin, vmax])
+                else:
+                    levs = None
+            else:
+                levs = None
+
+            # --- Plot either discrete contourf (levels) or continuous pcolormesh ---
+            if levs is not None:
+                # contourf will use levs as numeric boundaries; do not use BoundaryNorm
+                cf = ax[i].contourf(profG, depthG, varG, levels=levs, cmap=cmap, extend="both")
+                # optional contour lines
+                #ax[i].contour(profG, depthG, varG, levels=levs, colors="k", linewidths=0.3, alpha=0.5)
+                mappable = cf
+            else:
+                im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, vmin=vmin, vmax=vmax)
+                mappable = im
+
+            if mld_df is not None:
+                if (has_density_plot and cmap == cmo.dense) or (not has_density_plot and i == 0):
+                    ax[i].plot(mld_df['PROFILE_NUMBER'], mld_df['MLD'], color='black', marker='o', linewidth=0.5,
+                            label='Mixed Layer Depth', markersize=2)
+                    #ax[i].legend(loc='lower right', fontsize=8)
+
+            unit = utilities.get_unit(ds, var)
+            label = utilities.get_label(var)
+
+            total_profiles = x_plot[-1] - x_plot[0]
+            ax[i].invert_yaxis()
+            ax[i].set_ylabel('Depth (m)')
+            ax[i].grid(True)
+            ax[i].set_title(f'Section plot of {label}')
+            ax[i].set_xlim(np.min(x_plot)-total_profiles/50, np.max(x_plot)+total_profiles/50)
+
+            
+            # --- Colorbar: make spacing proportional when levs provided ---
+            if levs is not None:
+                # Provide boundaries=levs and spacing='proportional' so lengths reflect actual numeric gaps
+                cbar = plt.colorbar(mappable, ax=ax[i], pad=0.03, boundaries=levs, spacing='proportional')
+                # ticks at the boundary levels (format nicely with 1 decimal)
+                cbar.set_ticks(levs)
+                cbar.set_ticklabels([f"{l:.2f}" for l in levs])
+            else:
+                cbar = plt.colorbar(mappable, ax=ax[i], pad=0.03)
+            cbar.set_label(f'{label} [{unit}]', labelpad=20, rotation=270)
+
+        # Main x-axis: profile numbers
+        ax[-1].set_xlabel('Profile Number')
+
+        # Get mean time per profile (datetime) and profile numbers
+        times = pd.to_datetime(mean_times)
+        profiles = mean_times.index.values
+        time_nums = mdates.date2num(times)  # matplotlib float format for dates
+
+        # Build interpolators
+        to_time = interp1d(profiles, time_nums, bounds_error=False, fill_value="extrapolate")
+        to_profile = interp1d(time_nums, profiles, bounds_error=False, fill_value="extrapolate")
+
+        # Create a transform that maps profile numbers → time for the secondary x-axis
+        def forward(x):
+            return to_time(x)
+
+        def inverse(x):
+            return to_profile(x)
+
+        # Create the secondary axis (top), linked to the bottom profile axis
+        time_ax = ax[-1].secondary_xaxis("bottom", functions=(forward, inverse))
+        #time_ax.set_xlabel("Mean Time per Profile")
+        time_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        time_delta = time_nums[-1] - time_nums[0]
+        if time_delta < 5:
+            time_ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+        else:
+            time_ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        
+        time_ax.spines['bottom'].set_position(('outward', 40))
+        time_ax.tick_params(rotation=35)
     
     #plt.tight_layout()
     #plt.show()
     
     return fig, ax
+
 
 def plot_vertical_resolution(ds: xr.Dataset, profile_num: int) -> tuple:
     """
@@ -1055,7 +1158,7 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
         plt.show()
     return fig, axs
 
-def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False, ax = None, **kwargs):
+def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False, ax = None, plot_MLE = True, **kwargs):
     """
     Plots histograms of the specified variables from the dataset.
 
@@ -1115,13 +1218,26 @@ def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = 
             else:
                 x_label = f"{utilities.get_label(var)} ({utilities.get_unit(ds, var)})"
 
+            ### take only the data above 0.5 % and below 99.5%
+            min = np.nanpercentile(data,0.5)
+            max = np.nanpercentile(data,99.5)
+
             axes = np.atleast_1d(axes).flatten()
             ax = axes[i]
             ax.hist(data, bins=bins, density=density, **kwargs)
 
+            if plot_MLE:
+                ### calculate MLE and standard deviation from data
+                MLE, sigma = stats.norm.fit(data)  # returns (mu_hat, sigma_hat)
+                label = f"MLE estimate: {MLE:.2e}"
+                if log_scale:
+                    label = f"MLE estimate: {10**MLE:.2e}"
+                ax.axvline(MLE, color='black', linestyle='--', label=label)
+
             ax.set_xlabel(x_label)
             ax.set_ylabel('Probability Density' if density else 'Frequency')
             ax.set_title(f'Histogram of {utilities.get_label(var)}', fontsize=14)
+            ax.set_xlim(min,max)
 
         # Hide unused subplots
         for j in range(num_vars, len(axes)):

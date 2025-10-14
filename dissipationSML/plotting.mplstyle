@@ -5,7 +5,7 @@ date.converter: auto
 figure.figsize: 10,6
 font.family:  sans-serif
 font.style:   normal
-font.size: 13
+font.size: 12
 legend.fontsize: 12
 lines.linewidth : 1
 lines.linestyle: -

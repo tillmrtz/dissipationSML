@@ -25,13 +25,13 @@ sg012:
     faktor_mean: 0.76
 
 sg014:
-  014/20080214:
-    profile_range: [30, 90]
-    depth_range: [600, 900]
-    faktor: 1.1 # median
-    c: 0.41
-    faktor_mean: 1.1
-  014/20080222:
+  #014/20080214: ### Not inside the research area
+  #  profile_range: [30, 90]
+  #  depth_range: [600, 900]
+  #  faktor: 1.1 # median
+  #  c: 0.41
+  #  faktor_mean: 1.1
+  014/20080829:
     profile_range: [10, 150]
     depth_range: [600, 900]
     faktor: 1 # median
@@ -125,10 +125,10 @@ sg104:
     faktor: 0.93 # median
     c: 0.35
     faktor_mean: 0.96
-  104/20080214:
-    profile_range: [70, 150]
-    depth_range: [600, 1000]
-    faktor: 1.35 # median
-    c: 0.5
-    faktor_mean: 1.36
+  #104/20080214:    Also not in research area
+  #  profile_range: [70, 150]
+  #  depth_range: [600, 1000]
+  #  faktor: 1.35 # median
+  #  c: 0.5
+  #  faktor_mean: 1.36
 
