@@ -19,9 +19,9 @@ gliders:
         folder: "012/20070831"
   - name: "014"
     missions:
-      - date: 02/08
-        dives: 70
-        folder: "014/20080214"
+    #  - date: 02/08
+    #    dives: 70
+    #    folder: "014/20080214"
       - date: 08/08
         dives: 439
         folder: "014/20080829"
@@ -86,9 +86,9 @@ gliders:
       - date: 09/07
         dives: 371
         folder: "104/20070901"
-      - date: 02/08
-        dives: 112
-        folder: "104/20080214"
+    #  - date: 02/08
+    #    dives: 112
+    #    folder: "104/20080214"
       - date: 11/08
         dives: 1
         folder: "no folder"

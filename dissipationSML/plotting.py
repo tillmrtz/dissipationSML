@@ -1158,7 +1158,7 @@ def plot_dissipation_scatter(ds, rolling_str='1d', color_by='TIME'):
         plt.show()
     return fig, axs
 
-def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, density: bool = False, ax = None, plot_MLE = True, **kwargs):
+def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = False, style = "PDF", ax = None, **kwargs):
     """
     Plots histograms of the specified variables from the dataset.
 
@@ -1224,18 +1224,28 @@ def plot_histogram(ds, vars=['TEMP', 'PSAL'], bins: int = 50, log_scale: bool = 
 
             axes = np.atleast_1d(axes).flatten()
             ax = axes[i]
-            ax.hist(data, bins=bins, density=density, **kwargs)
+            if style == "PDF":
+                ax.hist(data, bins=bins, density=True, **kwargs)
+                ax.set_ylabel('Probability Density')
+            elif style == "Percentage":
+                ax.hist(data, bins=bins, density=False, weights=np.ones_like(data) / len(data) * 100, **kwargs)
+                ax.set_ylabel('Percentage (%)')
+            else:
+                print("Plotting the histogram as frequency counts. If you want to plot as PDF or Percentage, set style='PDF' or style='Percentage'")
+                ax.hist(data, bins=bins, **kwargs)
+                ax.set_ylabel('Frequency Counts')
 
-            if plot_MLE:
-                ### calculate MLE and standard deviation from data
-                MLE, sigma = stats.norm.fit(data)  # returns (mu_hat, sigma_hat)
-                label = f"MLE estimate: {MLE:.2e}"
-                if log_scale:
-                    label = f"MLE estimate: {10**MLE:.2e}"
-                ax.axvline(MLE, color='black', linestyle='--', label=label)
+            #if plot_MLE:
+            #    ### calculate MLE and standard deviation from data
+            #    MLE, sigma = stats.norm.fit(data, )  # returns (mu_hat, sigma_hat)
+            #    label = f"MLE estimate: {MLE:.2e}"
+            #   if log_scale == True:
+            #        label = f"MLE estimate: {10**MLE:.2e}"
+            #    ax.axvline(MLE, color='black', linestyle='--', label=label)
+
+            ### plot vertical line for the median if log_scale and mean if not log_scale
 
             ax.set_xlabel(x_label)
-            ax.set_ylabel('Probability Density' if density else 'Frequency')
             ax.set_title(f'Histogram of {utilities.get_label(var)}', fontsize=14)
             ax.set_xlim(min,max)
 

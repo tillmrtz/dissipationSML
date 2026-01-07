@@ -153,7 +153,8 @@ def convert_with_variables(datasets, variables_needed):
     """
     # Check first if variables are in the dataset, if not, raise an error
     ds = convertOG1.convert_to_OG1(datasets)
-    ds = ds.rename_vars({'divenum': 'DIVE_NUMBER'})
+    ds = ds.rename_vars({'divenum': 'DIVE_NUMBER','GLIDER_VERT_VELO_MODEL': 'W_M',
+                          'GLIDER_HORZ_VELO_MODEL': 'U_M'})
     for var in variables_needed:
         if var not in ds.variables:
             raise ValueError(f"Variable '{var}' not found in dataset. Possible variables are: {list(ds.variables)}")

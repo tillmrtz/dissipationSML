@@ -296,13 +296,15 @@ def add_unsorted_N2(ds):
         PRES = profile_data.PRES.values
         TEMP = profile_data.TEMP.values
         PSAL = profile_data.PSAL.values
+        SIG_T = profile_data.SIGMA_T.values
+
         ### mean the lat and long values for the profile
-        lat = np.nanmean(profile_data.LATITUDE.values)
-        long = np.nanmean(profile_data.LONGITUDE.values)
-        SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
-        CT = gsw.CT_from_t(SA, TEMP, PRES)
+        #lat = np.nanmean(profile_data.LATITUDE.values)
+        #long = np.nanmean(profile_data.LONGITUDE.values)
+        #SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
+        #CT = gsw.CT_from_t(SA, TEMP, PRES)
         
-        n2,p_mid = gsw.Nsquared(SA,CT,PRES,lat)
+        #n2,p_mid = gsw.Nsquared(SA,CT,PRES,lat)
         ### add one value to the end of the array to match the length of the profile
         n2 = np.append(n2, np.nan)
         n2_list.append(n2)
@@ -364,7 +366,7 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds
         window_size = max(1, int(window_size_seconds / mean_delta))
 
         # Compute RMS
-        velocity_squared = ds_profile[var] ** 2
+        velocity_squared = (ds_profile[var]/100) ** 2
         def rolling_rms(arr, window_size, dim="TIME"):
             rolled = arr.rolling({dim: window_size}, center=True)
             constructed = rolled.construct(f"{dim}_window")
@@ -376,7 +378,7 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds
 
     # Concatenate across profiles
     full_velocity_scale = xr.concat(all_velocity_scales, dim=dims)
-    full_velocity_scale = full_velocity_scale.sortby(ds.TIME) / 100 # convert cm/s to m/s
+    #full_velocity_scale = full_velocity_scale.sortby(ds.TIME) / 100 # convert cm/s to m/s
 
     # Add to dataset
     ds['VELOCITY_SCALE'] = full_velocity_scale
@@ -481,6 +483,7 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
     # Ensure we are working on a copy to avoid modifying in-place
     mld_ds = mld_ds.copy()
 
+    dims = list(ds.dims.keys())[0]
     for var in vars:
         print(f"Computing mean for {var} in MLD")
         mean_values = []
@@ -506,7 +509,7 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
             mean_values.append(values_in_mld.mean().values)
 
         # Add the result to the MLD dataset
-        mld_ds[var + '_MEAN'] = ('TIME', mean_values)
+        mld_ds[var + '_MEAN'] = (dims, np.array(mean_values))
 
     return mld_ds
 
@@ -672,9 +675,9 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
             print("Mean time interval is zero, skipping profile.")
             return None
 
-        fs = 1 / mean_dt
-        fc = 1 / cutoff_period
-        wn = fc / (fs / 2)
+        fs = 1 / mean_dt # 
+        fc = 1 / cutoff_period ### critical frequency in Hz
+        wn = 2 * fc /fs ## equals 2*mean_dt/cutoff_period
         b, a = butter(order, wn, btype='high')
 
         binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE','SIGMA_T'], binning=None, dim='TIME',max_interval = max_interval)
