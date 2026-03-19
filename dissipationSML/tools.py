@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 from dissipationSML import utilities
 
-def add_densities(ds: xr.Dataset, use_raw: bool = True):
+def add_densities(ds: xr.Dataset):
     """
     This function computes the potential density and its anomaly with respect to 0 dbar and 1000 dbar
     from the salinity and temperature data in the dataset. The computed values are added to the dataset if they do not
@@ -29,8 +29,6 @@ def add_densities(ds: xr.Dataset, use_raw: bool = True):
 
     """
     vars = ['PSAL', 'TEMP']
-    if use_raw:
-        vars = [var + '_RAW' for var in vars]
     
     PSAL = ds[vars[0]].values
     TEMP = ds[vars[1]].values
@@ -46,10 +44,7 @@ def add_densities(ds: xr.Dataset, use_raw: bool = True):
 
     for var in calculated:
         ### add only if the variable is not already in the dataset
-        if use_raw:
-            var_name = var + '_RAW'
-        else:
-            var_name = var
+        var_name = var
         if var_name in ds:
             continue
         if var == 'SIGTHETA':
@@ -60,13 +55,6 @@ def add_densities(ds: xr.Dataset, use_raw: bool = True):
             long_name = 'potential density anomaly with respect to 1000 dbar'
         ds[var_name] = xr.DataArray(calculated[var], dims=('N_MEASUREMENTS'),
                                attrs={'units': 'kg/m^3', 'long_name': long_name})
-
-    #ds['SIGTHETA_RAW'] = xr.DataArray(SIGTHETA_RAW, dims=('N_MEASUREMENTS'),
-    #                     attrs={'units': 'kg/m^3', 'long_name': 'potential density with respect to 0 dbar'})
-    #ds['SIGMA_T_RAW'] = xr.DataArray(SIGMA_T_RAW, dims=('N_MEASUREMENTS'), 
-    #                     attrs={'units': 'kg/m^3', 'long_name': 'potential density anomaly with respect to 0 dbar'})
-    #ds['SIGMA_1_RAW'] = xr.DataArray(SIGMA_1_RAW, dims=('N_MEASUREMENTS'),
-    #                        attrs={'units': 'kg/m^3', 'long_name': 'potential density anomaly with respect to 1000 dbar'})
 
     return ds
 
@@ -93,11 +81,10 @@ def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Data
     # Extract variables
     time = ds['TIME'].values
     depth = ds['DEPTH'].values
-    glider_velo = ds['GLIDER_VERT_VELO_MODEL'].values
+    glider_velo = ds['W_MODEL'].values
     profile_number = ds['PROFILE_NUMBER'].values.astype(int)
     # Clean glider velocity data by using PITCH
     pitch = ds['PITCH'].values
-    print(profile_number.dtype)
 
     msk1 = ((profile_number % 2 == 0) & (pitch > pitch_min) & (pitch < pitch_max)) # Climb profiles with pitch in range 10 to 25
     msk2 = ((profile_number % 2 == 1) & (pitch > -pitch_max) & (pitch < -pitch_min)) # Dive profiles with pitch in range -25 to -10
@@ -127,9 +114,9 @@ def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Data
     # Create DataArrays with metadata
     da_w_meas = xr.DataArray(
         w_meas,
-        dims=ds['GLIDER_VERT_VELO_MODEL'].dims,
-        coords=ds['GLIDER_VERT_VELO_MODEL'].coords,
-        name="VERTICAL_WATER_VELOCITY_MEASURED",
+        dims=ds['W_MODEL'].dims,
+        coords=ds['W_MODEL'].coords,
+        name="W_MEASURED",
         attrs={
             "units": "cm/s",
             "description": "Measured vertical velocity from depth change"
@@ -138,9 +125,9 @@ def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Data
 
     da_w_water = xr.DataArray(
         w_water,
-        dims=ds['GLIDER_VERT_VELO_MODEL'].dims,
-        coords=ds['GLIDER_VERT_VELO_MODEL'].coords,
-        name="VERTICAL_WATER_VELOCITY",
+        dims=ds['W_MODEL'].dims,
+        coords=ds['W_MODEL'].coords,
+        name="W_WATER",
         attrs={
             "units": "cm/s",
             "description": "Vertical water velocity (measured - glider model)"
@@ -148,10 +135,74 @@ def add_vertical_water_velocity(ds: xr.Dataset, pitch_min, pitch_max) -> xr.Data
     )
 
     # Add results to dataset
-    ds['VERTICAL_VELOCITY_MEASURED'] = da_w_meas
-    ds['VERTICAL_WATER_VELOCITY'] = da_w_water
+    ds['W_MEASURED'] = da_w_meas
+    ds['W_WATER'] = da_w_water
 
     ds.attrs['pitch_range'] = f"{pitch_min} to {pitch_max} degrees"
+
+    return ds
+
+def remove_spikes(ds, var, window=20, n_std=4, grad_threshold=1.0):
+    """
+    Remove spikes from a single variable in an xarray Dataset using
+    a rolling mean / standard-deviation filter and a vertical gradient check.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Dataset containing the variable to process. Must include a 'DEPTH' coordinate.
+    var : str
+        Name of the variable to clean (e.g., "TEMP", "PSAL").
+    window : int, optional
+        Size of the centered rolling window used to compute local mean and std. Default is 20.
+    n_std : float, optional
+        Number of standard deviations from the rolling mean used to identify spikes.
+    grad_threshold : float, optional
+        Maximum allowed absolute vertical gradient (dvar/dz). Values exceeding this
+        threshold are marked as spikes. Default is 1.0.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with spike values replaced by NaN for the specified variable.
+    """
+    arr = ds[var].values
+    depth = ds['DEPTH'].values
+
+    # Compute gradient of variable with respect to depth
+    grad_arr = ds[var].differentiate('DEPTH').values
+
+    # Convert to pandas Series for rolling calculations
+    s = pd.Series(arr)
+
+    # Rolling mean and standard deviation
+    roll_mean = s.rolling(window=window, center=True, min_periods=1).mean()
+    roll_std = s.rolling(window=window, center=True, min_periods=1).std()
+
+    deviation_mask = np.abs(s - roll_mean) > (n_std * roll_std)
+
+    # ---------- Gradient-based spike detection (improved!) ----------
+    # Identify only the true spike point:
+    # where gradient is large, next gradient is large,
+    # and gradients have opposite signs.
+    grad_spike_mask = np.zeros_like(arr, dtype=bool)
+
+    mask_pair = (
+        (np.abs(grad_arr[:-1]) > grad_threshold) &
+        (np.abs(grad_arr[1:]) > grad_threshold) &
+        (np.sign(grad_arr[:-1]) != np.sign(grad_arr[1:]))
+    )
+
+    # The spike is at index i, not i+1
+    grad_spike_mask[:-1] = mask_pair
+
+    spike_mask = deviation_mask | grad_spike_mask
+
+    # Replace spikes with NaN
+    s[spike_mask] = np.nan
+
+    # Update dataset
+    ds[var].values = s.values
 
     return ds
 
@@ -236,7 +287,7 @@ def sorted_N2_profile(df, plev=20):
 
     return pd.DataFrame({'SORTED_N2': n2_bray_interp, 'PRES':press, 'P_BAR': p_bars, "ALPHA_1": alpha_1s})
 
-def add_adiabatic_sorted_N2(ds, plev = 20):
+def add_adiabatic_sorted_N(ds, plev = 20):
     """
     Calculate adiabatic N² for each profile in the dataset and add it as a new variable.
 
@@ -253,29 +304,21 @@ def add_adiabatic_sorted_N2(ds, plev = 20):
         The dataset with the adiabatic N² variable added.
     """
     groups = utilities.group_by_profiles(ds, ["PRES","TEMP","PSAL","LATITUDE","LONGITUDE", "DEPTH","TIME"])
-    print(f"Calculating adiabatic N² for {len(groups)} profiles...")
+    print(f"Calculating adiabatic N for {len(groups)} profiles...")
     df = groups.apply(sorted_N2_profile,plev=plev)
 
-    dims = list(ds.dims.keys())[0]
-
-    SORTED_N2_da = xr.DataArray(df['SORTED_N2'].to_numpy(), dims=dims, attrs={
-        'long_name': 'Adiabatically sorted N²',
-        'units': '1/s^2',
-        'plev': plev})
+    dims = list(ds.sizes.keys())[0]
     
     SORTED_N_da = xr.DataArray(df['SORTED_N2'].to_numpy()**0.5, dims=dims, attrs={
         'long_name': 'Adiabatically sorted N',
         'units': '1/s',
         'plev': plev})
 
-    ds['SORTED_N2'] = SORTED_N2_da
     ds['SORTED_N'] = SORTED_N_da
-    ds['SORTED_N2_LOG'] = np.log10(SORTED_N2_da)
-    ds['SORTED_N_LOG'] = np.log10(SORTED_N_da)
 
     return ds
 
-def add_unsorted_N2(ds):
+def add_unsorted_N(ds, var_rho='SIGTHETA'):
     """
     Calculate adiabatic N² for each profile in the dataset and add it as a new variable.
 
@@ -290,37 +333,34 @@ def add_unsorted_N2(ds):
         The dataset with the adiabatic N² variable added.
     """
     profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
-    n2_list = []
+    n_all = []
     for profile_number in tqdm(profile_numbers):
         profile_data = ds.where(ds.PROFILE_NUMBER == profile_number, drop=True)
-        PRES = profile_data.PRES.values
-        TEMP = profile_data.TEMP.values
-        PSAL = profile_data.PSAL.values
-        SIG_T = profile_data.SIGMA_T.values
-
-        ### mean the lat and long values for the profile
-        #lat = np.nanmean(profile_data.LATITUDE.values)
-        #long = np.nanmean(profile_data.LONGITUDE.values)
-        #SA = gsw.SA_from_SP(PSAL, PRES, long, lat)
-        #CT = gsw.CT_from_t(SA, TEMP, PRES)
-        
-        #n2,p_mid = gsw.Nsquared(SA,CT,PRES,lat)
-        ### add one value to the end of the array to match the length of the profile
-        n2 = np.append(n2, np.nan)
-        n2_list.append(n2)
+        #PRES = profile_data.PRES.values
+        #TEMP = profile_data.TEMP.values
+        #PSAL = profile_data.PSAL.values
+        z = profile_data.DEPTH.values
+        rho = profile_data[var_rho].values
+        n_profile = np.full_like(rho, np.nan, dtype=float)
+        for i in range(2, len(z) - 2):
+            dz = z[i + 2] - z[i - 2]
+            drho = rho[i + 2] - rho[i - 2]
+            if dz != 0 and not np.isnan(drho) and not np.isnan(dz) and not drho/dz < 0:
+                n_profile[i] = np.sqrt((9.81 / 1027) * (drho / dz))
+        n_all.append(n_profile)
     
-    n2_unsorted = np.concatenate(n2_list)
-    dims = list(ds.dims.keys())[0]
-    n2_unsorted = xr.DataArray(n2_unsorted, dims=dims, attrs={
-        'long_name': 'Unsroted Brunt-Väisälä frequency squared',
-        'units': '1/s^2'
+    n_all = np.concatenate(n_all)
+    dims = list(ds.sizes.keys())[0]
+    n_all = xr.DataArray(n_all, dims=dims, attrs={
+        'long_name': 'Unsorted Brunt-Väisälä frequency',
+        'units': '1/s'
     })
 
-    ds['UNSORTED_N2'] = n2_unsorted
+    ds['N'] = n_all
 
     return ds
 
-def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds=100):
+def add_velocity_scale(ds, var='W_WATER_HP', window_size_seconds=100):
     """
     Compute RMS of velocity in a moving window for each profile and add it to the dataset as 'VELOCITY_SCALE'.
 
@@ -340,7 +380,7 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds
     """
     profile_numbers = np.unique(ds.PROFILE_NUMBER.values)
     all_velocity_scales = []
-    dims = list(ds.dims.keys())[0]
+    dims = list(ds.sizes.keys())[0]
 
     for profile_number in tqdm(profile_numbers, desc="Processing profiles"):
         if dims == 'N_MEASUREMENTS':
@@ -377,35 +417,25 @@ def add_velocity_scale(ds, var='VERTICAL_WATER_VELOCITY_HP', window_size_seconds
         all_velocity_scales.append(velocity_scale)
 
     # Concatenate across profiles
-    full_velocity_scale = xr.concat(all_velocity_scales, dim=dims)
+    sigma_w = xr.concat(all_velocity_scales, dim=dims)
     #full_velocity_scale = full_velocity_scale.sortby(ds.TIME) / 100 # convert cm/s to m/s
 
     # Add to dataset
-    ds['VELOCITY_SCALE'] = full_velocity_scale
-    ds['VELOCITY_SCALE'].attrs = {
-        'long_name': 'Velocity scale',
+    ds['SIGMA_W'] = sigma_w
+    ds['SIGMA_W'].attrs = {
+        'long_name': 'Velocity variance scale',
         'description': f'RMS of {var} in ±{window_size_seconds / 2} second window per profile',
         'units': 'm/s',
         'window_size_seconds': window_size_seconds
     }
-    ds['VELOCITY_SCALE_2'] = xr.DataArray(
-        ds['VELOCITY_SCALE']**2,
+    ds['VELOCITY_SCALE'] = xr.DataArray(
+        ds['SIGMA_W']**2,
         dims=dims,
-        coords=ds['VELOCITY_SCALE'].coords,
+        coords=ds['SIGMA_W'].coords,
         attrs={
-            'long_name': 'Squared velocity scale',
+            'long_name': 'Velocity scale sigma_w^2',
             'description': 'Squared velocity scale for further calculations',
             'units': 'm^2/s^2'
-        }
-    )
-    ds['VELOCITY_SCALE_2_LOG'] = xr.DataArray(
-        np.log10(ds['VELOCITY_SCALE']**2),
-        dims=dims,
-        coords=ds['VELOCITY_SCALE'].coords,
-        attrs={
-            'long_name': 'Log10 of squared velocity scale',
-            'description': 'Logarithm of the squared velocity scale for better visualization',
-            'units': 'log10(m^2/s^2)'
         }
     )
 
@@ -429,14 +459,13 @@ def LEM_dissipation(ds, c=0.37):
         The dataset with a new variable 'DISSIPATION_LEM'.
     """
     # Ensure required variables exist
-    if 'SORTED_N2' not in ds or 'VELOCITY_SCALE' not in ds:
+    if 'SORTED_N' not in ds or 'VELOCITY_SCALE' not in ds:
         raise ValueError("Dataset must contain 'SORTED_N2' and 'VELOCITY_SCALE' variables.")
 
     # Compute dissipation
     velocity_scale = ds['VELOCITY_SCALE']
-    N2 = ds['SORTED_N2']
-    N = ds['SORTED_N2'] ** 0.5
-    dissipation = c * N * (velocity_scale ** 2)
+    N = ds['SORTED_N']
+    dissipation = c * N * velocity_scale
     
     ###mask all values below 1e-10
     #dissipation = dissipation.where(dissipation > 1e-10, drop=True)
@@ -444,23 +473,102 @@ def LEM_dissipation(ds, c=0.37):
     dissipation_log = np.log10(dissipation)
 
     # Add to dataset with metadata
-    ds['DISSIPATION_LEM'] = dissipation
-    ds['DISSIPATION_LEM'].attrs = {
+    ds['EPSILON'] = dissipation
+    ds['EPSILON'].attrs = {
         'long_name': 'Turbulent kinetic energy dissipation rate (LEM)',
-        'description': "Calculated as ε = c * N * (q')² using Large Eddy Method",
+        'description': "Calculated as ε = c * N * sigma_w² using Large Eddy Method",
         'units': 'W/kg',  # Assuming N in 1/s and q' in m/s
         'c_epsilon': c
-    }
-    ds['DISSIPATION_LEM_LOG'] = dissipation_log
-    ds['DISSIPATION_LEM_LOG'].attrs = {
-        'long_name': 'Log10 of turbulent kinetic energy dissipation rate (LEM)',
-        'description': "Logarithm of the dissipation rate for better visualization",
-        'units': 'log10(W/kg)'
     }
 
     ds.attrs['c_epsilon'] = c  # Store model constant in dataset attributes
 
     return ds
+
+def find_boundary_OL(ds):
+    profiles = np.unique(ds.PROFILE_NUMBER)
+    boundary_OL = np.full(len(profiles), np.nan)
+    
+    for i, profile_i in enumerate(tqdm(profiles)):
+        profile = ds.where(ds['PROFILE_NUMBER'] == profile_i, drop=True)
+        temp = profile['TEMP'].values
+        depth = profile['DEPTH'].values
+
+        # remove NaNs
+        isnan = ~np.isnan(temp) & ~np.isnan(depth)
+        temp = temp[isnan]
+        depth = depth[isnan]
+
+        if len(temp) < 2:
+            continue
+
+        # sort by depth
+        sort_idx = np.argsort(depth)
+        depth = depth[sort_idx]
+        temp = temp[sort_idx]
+
+        # compute dT/dz
+        dtemp_dz = np.gradient(temp, depth)
+
+        # apply condition: T < 3 °C and |dT/dz| < 0.004
+        mask = (temp < 3) & (np.abs(dtemp_dz) < 0.004)
+
+        if np.any(mask):
+            boundary_OL[i] = depth[mask].min()
+    
+    return boundary_OL
+
+
+def find_boundary_AL(ds):
+    profiles = np.unique(ds.PROFILE_NUMBER)
+    boundary_AL = np.full(len(profiles), np.nan)
+    
+    for i, profile_i in enumerate(tqdm(profiles)):
+        profile = ds.where(ds['PROFILE_NUMBER'] == profile_i, drop=True)
+        temp = profile['TEMP'].values
+        depth = profile['DEPTH'].values
+
+        # remove NaNs
+        isnan = ~np.isnan(temp) & ~np.isnan(depth)
+        temp = temp[isnan]
+        depth = depth[isnan]
+
+        if len(temp) < 2:
+            continue
+
+        # sort by depth
+        sort_idx = np.argsort(depth)
+        depth = depth[sort_idx]
+        temp = temp[sort_idx]
+
+        # compute dT/dz
+        dtemp_dz = np.gradient(temp, depth)
+
+        # apply condition: T > 7.7 °C and |dT/dz| < 0.01
+        mask = (temp > 7.7) & (np.abs(dtemp_dz) < 0.01) & (depth > 50)
+
+        if np.any(mask):
+            boundary_AL[i] = depth[mask].max()
+    
+    return boundary_AL
+
+def avg_profiles(ds, var_name, binsize=5, HAB = False, log = False):
+    """
+    Averages profiles of a given variable over specified depth bins.
+    If HAB is True, depth is calculated as HAB + BATHYMETRY, meaning height above bottom.
+    """
+    if HAB:
+        BATH = ds.BATHYMETRY.values
+        depth = -(ds.DEPTH.values + BATH)
+    else:
+        depth = ds.DEPTH.values
+    profiles = ds.PROFILE_NUMBER
+    var_values = ds[var_name].values
+    if log:
+        var_values = np.log10(var_values)
+
+    var, depth_grid, profile_grid = utilities.construct_2dgrid(depth, profiles, var_values, xi=binsize, yi=np.max(profiles), agg='mean')
+    return var, depth_grid, profile_grid
 
 def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
     """
@@ -483,7 +591,7 @@ def mean_in_mld(ds: xr.Dataset, mld_ds: xr.Dataset, vars: list) -> xr.Dataset:
     # Ensure we are working on a copy to avoid modifying in-place
     mld_ds = mld_ds.copy()
 
-    dims = list(ds.dims.keys())[0]
+    dims = list(ds.sizes.keys())[0]
     for var in vars:
         print(f"Computing mean for {var} in MLD")
         mean_values = []
@@ -680,7 +788,7 @@ def highpass_butterworth_time(ds, var, cutoff_period=330, order=4, max_interval=
         wn = 2 * fc /fs ## equals 2*mean_dt/cutoff_period
         b, a = butter(order, wn, btype='high')
 
-        binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE','SIGMA_T'], binning=None, dim='TIME',max_interval = max_interval)
+        binned_df = utilities.bin_profile(profile, [var, 'DEPTH','PRES','TEMP','PSAL','LONGITUDE','LATITUDE','SIGMA_T','SIGTHETA'], binning=None, dim='TIME',max_interval = max_interval)
         signal = binned_df[var].values
 
         profile_filtered = np.full_like(signal, np.nan)

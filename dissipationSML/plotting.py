@@ -1,5 +1,6 @@
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from cmocean import cm as cmo
 import numpy as np
 import pandas as pd
@@ -50,7 +51,7 @@ def get_bathymetry_levels(bath, level_spacing=250):
         max_level: int
             The maximum bathymetry level.
         """
-        max_depth = np.max(bath.elevation.values)  # Depths are negative
+        max_depth = np.max(-bath.elevation.values)  # Depths are negative
         max_level = level_spacing * (np.round(max_depth / level_spacing) + 1)
         levels = np.arange(0, max_level, level_spacing)
         contour_levels = levels[::2]  # Every second level
@@ -449,7 +450,7 @@ def plot_scatter(ds, vars=['PSAL', 'TEMP', 'DENSITY'], start=None, end=None, mld
 
     return fig, ax
 
-def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=None, mld_df = None, levels=None, ax = None):
+def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=None, mld_df = None, levels=None, ax = None, log_scale = False):
     """
     Plots a section of the dataset with PROFILE_NUMBER on the x-axis, DEPTH on the y-axis,
     and mean TIME per profile as secondary x-axis (automatically spaced).
@@ -472,6 +473,8 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
         - None (default): continuous colormap (pcolormesh).
         - True: use 10 equally spaced discrete levels (rounded to 1 decimal).
         - list/array of floats: use exactly these levels (non-uniform spacing honored).
+    log_scale : bool
+        If True, use logarithmic scale for color mapping.
 
     Returns
     -------
@@ -517,7 +520,7 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
             # Create new figure and axes if none provided
             fig, ax = plt.subplots(
                 num_vars, 1,
-                figsize=(20, 7 * num_vars),
+                figsize=(15, 5 * num_vars),
                 sharex=True,
                 gridspec_kw={'height_ratios': [8] * num_vars}
             )
@@ -564,8 +567,12 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
             elif levels is True:
                 # 10 evenly spaced rounded levels (one decimal)
                 if np.isfinite(vmin) and np.isfinite(vmax) and (vmax > vmin):
-                    levs = np.round(np.linspace(vmin, vmax, 10), 2)
-                    levs = np.unique(levs)
+                    if log_scale == True:
+                        levs = np.linspace(np.log10(vmin), np.log10(vmax), 10)
+                        levs = 10 ** np.round(levs, 2)  # round in log space
+                    else:
+                        levs = np.round(np.linspace(vmin, vmax, 10), 2)
+                        levs = np.unique(levs)
                     if levs.size < 2:
                         # fallback if rounding collapsed values
                         levs = np.array([vmin, vmax])
@@ -582,7 +589,10 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
                 #ax[i].contour(profG, depthG, varG, levels=levs, colors="k", linewidths=0.3, alpha=0.5)
                 mappable = cf
             else:
-                im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, vmin=vmin, vmax=vmax)
+                if log_scale:
+                    im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
+                else:
+                    im = ax[i].pcolormesh(profG, depthG, varG, cmap=cmap, vmin=vmin, vmax=vmax)
                 mappable = im
 
             if mld_df is not None:
@@ -610,7 +620,11 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
                 cbar.set_ticks(levs)
                 cbar.set_ticklabels([f"{l:.2f}" for l in levs])
             else:
-                cbar = plt.colorbar(mappable, ax=ax[i], pad=0.03)
+                if log_scale:
+                    cbar = plt.colorbar(mappable, ax=ax[i], pad=0.03)
+                    cbar.ax.set_yscale('log')
+                else:
+                    cbar = plt.colorbar(mappable, ax=ax[i], pad=0.03)
             cbar.set_label(f'{label} [{unit}]', labelpad=20, rotation=270)
 
         # Main x-axis: profile numbers

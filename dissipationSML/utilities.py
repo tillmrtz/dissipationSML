@@ -357,6 +357,11 @@ variable_dict = {
         "units": "W kg⁻¹",
         "colormap": cmo.delta
     },
+    "DISSIPATION_LEM": {
+        "label": r"e",
+        "units": "W kg⁻¹",
+        "colormap": cmo.delta
+    },
     "VELOCITY_SCALE_2_LOG": {
         "label": r"log$_{10}(σ_{w}²)$",
         "units": "m² s⁻²",
