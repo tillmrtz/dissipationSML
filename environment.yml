@@ -1,0 +1,39 @@
+name: dissipationSML_test
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.14
+
+  - numpy
+  - scipy
+  - pandas
+  - xarray
+  - numba
+
+  - ipython
+  - ipykernel
+
+  - matplotlib
+  - seaborn
+
+  - netcdf4
+  - cftime
+
+  - cartopy
+  - geopandas
+  - regionmask
+  - rasterio
+
+  - pyyaml
+  - requests
+  - tqdm
+
+  - pip
+
+  - pip:
+      - gsw
+      - cmocean
+      - multitaper
+      - git+https://github.com/ocean-uhh/seagliderOG1.git

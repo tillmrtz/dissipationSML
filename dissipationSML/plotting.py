@@ -658,6 +658,7 @@ def plot_section(ds, vars=['PSAL', 'TEMP', 'DENSITY'], v_res=2, start=None, end=
         
         time_ax.spines['bottom'].set_position(('outward', 40))
         time_ax.tick_params(rotation=35)
+        ax.append(time_ax)
     
     #plt.tight_layout()
     #plt.show()
